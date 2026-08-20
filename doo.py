@@ -1,7 +1,8 @@
 """
 স্বয়ংক্রিয় বাংলা নিউজ বট — ৫ সোর্স (sitemap/RSS + og:image) → কার্ড → Facebook Page পোস্ট
 ব্রাউজার অটোমেশন (কুকি GitHub Secrets-এ), DeepSeek/Blogger/API নেই।
-ফিক্স: কার্ড রেন্ডার এখন মেইন ব্রাউজারেই হয় — nested sync_playwright নেই।
+ফিক্স ১: কার্ড রেন্ডার মেইন ব্রাউজারেই — nested sync_playwright নেই।
+ফিক্স ২: composer trigger = visible text "What's on your mind?" (নাম ছাড়া)।
 """
 import os, re, json, time, random, hashlib, requests, jinja2, base64, warnings
 import pytz
@@ -510,9 +511,9 @@ def post_to_facebook(page, caption, image_path):
             page.mouse.wheel(0, random.randint(300, 600))
             time.sleep(random.uniform(0.5, 1.2))
 
-        # ১. কম্পোজার খোলা
-        trigger = page.wait_for_selector(
-            'div[role="button"][aria-label*="What\'s on your mind"]', timeout=20000)
+        # ১. কম্পোজার খোলা — span-এর visible text "What's on your mind?" (নাম ছাড়া)
+        trigger = page.get_by_text("What's on your mind?", exact=True).first
+        trigger.wait_for(timeout=20000)
         box = trigger.bounding_box()
         human_mouse_move(page, box['x'] + box['width'] // 2, box['y'] + box['height'] // 2)
         trigger.click()
