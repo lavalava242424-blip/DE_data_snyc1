@@ -1,15 +1,18 @@
 """
 স্বয়ংক্রিয় বাংলা নিউজ বট — ৫ সোর্স (sitemap/RSS + og:image) → কার্ড → Facebook Page পোস্ট
 ব্রাউজার অটোমেশন (কুকি GitHub Secrets-এ), DeepSeek/Blogger/API নেই।
+ফিক্স: কার্ড রেন্ডার এখন মেইন ব্রাউজারেই হয় — nested sync_playwright নেই।
 """
-import os, re, json, time, random, hashlib, requests, jinja2, base64
+import os, re, json, time, random, hashlib, requests, jinja2, base64, warnings
 import pytz
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
 from urllib.robotparser import RobotFileParser
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from playwright.sync_api import sync_playwright
+
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 BD_TZ = pytz.timezone("Asia/Dhaka")
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -448,7 +451,8 @@ def bengali_date_today():
     year = "".join(bd[int(d)] for d in str(now.year))
     return f"{day} {months[now.month]} {year}"
 
-def create_news_card(title, img_path, out_path, category, date_str, logo_path=None):
+def create_news_card(browser, title, img_path, out_path, category, date_str, logo_path=None):
+    """কার্ড রেন্ডার — মেইন ব্রাউজারেই নতুন পেজ খুলে (nested sync_playwright নয়)"""
     logo_uri = ""
     if logo_path and os.path.exists(logo_path):
         logo_uri = image_to_base64(logo_path)
@@ -457,15 +461,14 @@ def create_news_card(title, img_path, out_path, category, date_str, logo_path=No
         logo_data_uri=logo_uri, category=category, date=date_str)
     with open("temp_card.html", "w", encoding="utf-8") as f:
         f.write(html)
-    headless = os.environ.get("HEADLESS", "false").lower() == "true"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(channel="chrome", headless=headless)
-        page = browser.new_page(viewport={"width": 1080, "height": 1080})
+    page = browser.new_page(viewport={"width": 1080, "height": 1080})
+    try:
         page.goto(f"file://{os.path.abspath('temp_card.html')}")
         page.wait_for_load_state("networkidle")
         page.evaluate("() => document.fonts.ready.then(() => true)")
         page.screenshot(path=out_path, clip={"x": 0, "y": 0, "width": 1080, "height": 1080})
-        browser.close()
+    finally:
+        page.close()
     return out_path
 
 # ──────────────────────────────────────────────
@@ -661,7 +664,7 @@ def run_bot_loop():
                 time.sleep(60)
                 continue
 
-            create_news_card(art["title"], img_file, "card_output.jpg",
+            create_news_card(browser, art["title"], img_file, "card_output.jpg",
                              CARD_CATEGORY, bengali_date_today(), logo_path)
             print("🖼️ Card created")
 
