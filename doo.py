@@ -1,8 +1,6 @@
 """
 স্বয়ংক্রিয় বাংলা নিউজ বট — ৫ সোর্স (sitemap/RSS + og:image) → কার্ড → Facebook Page পোস্ট
-ব্রাউজার অটোমেশন (কুকি GitHub Secrets-এ), DeepSeek/Blogger/API নেই।
-ফিক্স ১: কার্ড রেন্ডার মেইন ব্রাউজারেই — nested sync_playwright নেই।
-ফিক্স ২: composer trigger = visible text "What's on your mind?" (নাম ছাড়া)।
+ফিক্স: লোগো সাইজ (CSS specificity bug), ফন্ট force-load, nested playwright নেই।
 """
 import os, re, json, time, random, hashlib, requests, jinja2, base64, warnings
 import pytz
@@ -395,7 +393,7 @@ def pick_article(posted_cache, failed):
     return None
 
 # ──────────────────────────────────────────────
-# IMAGE + CARD
+# IMAGE + CARD (Black & White, Hind Siliguri, লোগো ফিক্সড)
 # ──────────────────────────────────────────────
 def download_image(url, fname, referer=None):
     headers = dict(HDR)
@@ -417,24 +415,38 @@ def download_image(url, fname, referer=None):
 
 CARD_TEMPLATE_HTML = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
-<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{width:1080px;height:1080px;background:#fff;font-family:'Hind Siliguri',sans-serif;overflow:hidden}
-.imgwrap{width:1080px;height:640px;background:#111;position:relative}
-.imgwrap img{width:100%;height:100%;object-fit:cover;display:block}
-{% if logo_data_uri %}.logo{position:absolute;top:24px;left:24px;height:64px}{% endif %}
-.body{padding:36px 48px;height:440px;display:flex;flex-direction:column}
-.badge{align-self:flex-start;background:#111;color:#fff;font-size:30px;font-weight:600;padding:8px 24px;border-radius:6px;margin-bottom:24px}
-.title{font-size:52px;line-height:1.35;font-weight:700;color:#111;display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}
-.footer{margin-top:auto;display:flex;justify-content:space-between;color:#666;font-size:28px}
-</style></head><body>
-<div class="imgwrap"><img src="{{ image_data_uri }}">{% if logo_data_uri %}<img class="logo" src="{{ logo_data_uri }}">{% endif %}</div>
+html,body{width:1080px;height:1080px}
+body{background:#fff;font-family:'Hind Siliguri','Noto Sans Bengali',sans-serif;overflow:hidden}
+.imgwrap{position:relative;width:1080px;height:655px;background:#000}
+.imgwrap img.news{width:1080px;height:655px;object-fit:cover;display:block}
+.imgwrap img.logo{position:absolute;top:26px;left:26px;height:76px;width:auto;max-width:300px;
+  object-fit:contain;background:rgba(255,255,255,.92);padding:10px 16px;border-radius:12px;
+  box-shadow:0 2px 10px rgba(0,0,0,.25)}
+.body{width:1080px;height:425px;padding:34px 50px;display:flex;flex-direction:column}
+.badge{align-self:flex-start;background:#000;color:#fff;font-size:30px;font-weight:600;
+  letter-spacing:.5px;padding:6px 26px;border-radius:4px;margin-bottom:22px}
+.title{font-size:50px;line-height:1.4;font-weight:700;color:#111;display:-webkit-box;
+  -webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.footer{margin-top:auto;display:flex;justify-content:space-between;align-items:center;
+  border-top:2px solid #111;padding-top:16px;color:#555;font-size:27px;font-weight:500}
+.footer .dot{width:14px;height:14px;background:#000;border-radius:50%}
+</style></head>
+<body>
+<div class="imgwrap">
+  <img class="news" src="{{ image_data_uri }}">
+  {% if logo_data_uri %}<img class="logo" src="{{ logo_data_uri }}">{% endif %}
+</div>
 <div class="body">
-<span class="badge">{{ category }}</span>
-<div class="title">{{ title }}</div>
-<div class="footer"><span>{{ date }}</span><span>📰</span></div>
-</div></body></html>"""
+  <span class="badge">{{ category }}</span>
+  <div class="title">{{ title }}</div>
+  <div class="footer"><span>{{ date }}</span><span class="dot"></span></div>
+</div>
+</body></html>"""
 
 def image_to_base64(path):
     with open(path, "rb") as f:
@@ -466,7 +478,14 @@ def create_news_card(browser, title, img_path, out_path, category, date_str, log
     try:
         page.goto(f"file://{os.path.abspath('temp_card.html')}")
         page.wait_for_load_state("networkidle")
-        page.evaluate("() => document.fonts.ready.then(() => true)")
+        # ফন্ট force-load — যেন রানার-এ কখনো fallback ফন্ট না আসে
+        page.evaluate("""() => Promise.all([
+            document.fonts.load('700 50px "Hind Siliguri"'),
+            document.fonts.load('600 30px "Hind Siliguri"'),
+            document.fonts.load('500 27px "Hind Siliguri"'),
+            document.fonts.load('400 27px "Hind Siliguri"')
+        ]).then(() => true)""")
+        page.wait_for_timeout(500)
         page.screenshot(path=out_path, clip={"x": 0, "y": 0, "width": 1080, "height": 1080})
     finally:
         page.close()
@@ -511,7 +530,7 @@ def post_to_facebook(page, caption, image_path):
             page.mouse.wheel(0, random.randint(300, 600))
             time.sleep(random.uniform(0.5, 1.2))
 
-        # ১. কম্পোজার খোলা — span-এর visible text "What's on your mind?" (নাম ছাড়া)
+        # ১. কম্পোজার খোলা — span-এর visible text "What's on your mind?"
         trigger = page.get_by_text("What's on your mind?", exact=True).first
         trigger.wait_for(timeout=20000)
         box = trigger.bounding_box()
