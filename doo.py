@@ -1,6 +1,9 @@
 """
 স্বয়ংক্রিয় বাংলা নিউজ বট — ৫ সোর্স (sitemap/RSS + og:image) → কার্ড → Facebook Page পোস্ট
-ফিক্স: লোগো সাইজ (CSS specificity bug), ফন্ট force-load, nested playwright নেই।
+ফিক্স: og:title সাফিক্স ক্লিনআপ, nested playwright নেই।
+নতুন: কার্ড ডিজাইন den.py থেকে হুবহু আনা হয়েছে — ছবি (৬০৮px, ১৬:৯) → পাতলা সাদা
+রুল → কালো ইনভার্টেড ব্লক (Noto Serif Bengali হেডলাইন, সাদা আউটলাইন ক্যাটাগরি-ব্যাজ,
+ধূসর তারিখ) → ছবির উপর ভাসমান ১০৬×১০৬px লোগো (drop-shadow সহ, কোনো সাদা বক্স নেই)।
 """
 import os, re, json, time, random, hashlib, requests, jinja2, base64, warnings
 import pytz
@@ -342,6 +345,20 @@ def get_source_urls(src):
 # ──────────────────────────────────────────────
 # og:title + og:image
 # ──────────────────────────────────────────────
+def clean_og_title(title):
+    """og:title-এ সাইট নিজে যে সাফিক্স জুড়ে দেয় (' | সাইট নাম', ' - সাইট নাম',
+    ' – সাইট নাম' ইত্যাদি) তা বাদ দেওয়া হয়। এই সাফিক্স ক্যাপশনে গেলে দেখতে খারাপ
+    লাগে, আর keyword-এ ঢুকে গেলে is_similar_topic() ভুলভাবে সব আর্টিকেলকে
+    "একই টপিক" ধরে ফেলে (কারণ সাইটের নামটাই প্রতিবার মিলে যায়)।
+    সবচেয়ে লম্বা অংশটা রাখা হয় যাতে টাইটেলে '|' বা '-' থাকলেও ভুলে ছোট না হয়ে যায়।"""
+    if not title:
+        return title
+    parts = re.split(r'\s[|\-–—]\s', title)
+    if len(parts) > 1:
+        parts = [p.strip() for p in parts if p.strip()]
+        title = max(parts, key=len)
+    return title.strip()
+
 def fetch_og(url):
     html = fetch_text(url)
     if not html:
@@ -355,6 +372,7 @@ def fetch_og(url):
     img = (i.get("content") or "").strip()
     if not title or not img:
         return None
+    title = clean_og_title(title)
     if img.startswith("//"):
         img = "https:" + img
     elif img.startswith("/"):
@@ -393,7 +411,7 @@ def pick_article(posted_cache, failed):
     return None
 
 # ──────────────────────────────────────────────
-# IMAGE + CARD (Black & White, Hind Siliguri, লোগো ফিক্সড)
+# IMAGE + CARD (den.py ডিজাইন — কালো ইনভার্টেড ব্লক, সেরিফ হেডলাইন, ভাসমান লোগো)
 # ──────────────────────────────────────────────
 def download_image(url, fname, referer=None):
     headers = dict(HDR)
@@ -414,39 +432,115 @@ def download_image(url, fname, referer=None):
     return None
 
 CARD_TEMPLATE_HTML = """<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap" rel="stylesheet">
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<title>News Card</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+Bengali:wght@400;600;700&family=Noto+Sans+Bengali:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-html,body{width:1080px;height:1080px}
-body{background:#fff;font-family:'Hind Siliguri','Noto Sans Bengali',sans-serif;overflow:hidden}
-.imgwrap{position:relative;width:1080px;height:655px;background:#000}
-.imgwrap img.news{width:1080px;height:655px;object-fit:cover;display:block}
-.imgwrap img.logo{position:absolute;top:26px;left:26px;height:76px;width:auto;max-width:300px;
-  object-fit:contain;background:rgba(255,255,255,.92);padding:10px 16px;border-radius:12px;
-  box-shadow:0 2px 10px rgba(0,0,0,.25)}
-.body{width:1080px;height:425px;padding:34px 50px;display:flex;flex-direction:column}
-.badge{align-self:flex-start;background:#000;color:#fff;font-size:30px;font-weight:600;
-  letter-spacing:.5px;padding:6px 26px;border-radius:4px;margin-bottom:22px}
-.title{font-size:50px;line-height:1.4;font-weight:700;color:#111;display:-webkit-box;
-  -webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
-.footer{margin-top:auto;display:flex;justify-content:space-between;align-items:center;
-  border-top:2px solid #111;padding-top:16px;color:#555;font-size:27px;font-weight:500}
-.footer .dot{width:14px;height:14px;background:#000;border-radius:50%}
-</style></head>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { width: 1080px; height: 1080px; background:#fff; display:flex; align-items:center; justify-content:center; }
+
+.card {
+  width: 1080px; height: 1080px;
+  background:#fff;
+  display:flex;
+  flex-direction:column;
+  position:relative;
+}
+
+/* ---- image, fixed to a 16:9 box ---- */
+.image-wrap {
+  width:100%;
+  height:608px;         /* 1080 x 608 ≈ 16:9 */
+  position:relative;
+  overflow:hidden;
+  background:#000;      /* letterbox colour if an image doesn't fill the box */
+  flex-shrink:0;
+}
+.card-image {
+  width:100%; height:100%;
+  object-fit:cover;
+  object-position: center 25%;   /* nudge up/down per photo if a face gets cropped */
+  display:block;
+}
+/* ---- divider ---- */
+.rule { height:2px; background:#fff; flex-shrink:0; }
+
+/* ---- text block (inverted: black ground, white ink) ---- */
+.content {
+  flex:1;
+  background:#000;
+  padding:44px 64px 40px;
+  display:flex;
+  flex-direction:column;
+  justify-content:space-between;
+}
+
+.category {
+  align-self:flex-start;
+  font-family:'Noto Sans Bengali', sans-serif;
+  font-size:22px;
+  font-weight:700;
+  letter-spacing:1.5px;
+  color:#fff;
+  border:1.5px solid #fff;
+  padding:9px 22px;
+  margin-bottom:28px;
+}
+
+.headline {
+  font-family:'Noto Serif Bengali', serif;
+  font-size:58px;
+  font-weight:700;
+  line-height:1.35;
+  color:#fff;
+  flex:1;
+}
+
+.meta {
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  padding-top:22px;
+  border-top:1px solid #fff;
+  margin-top:24px;
+}
+.logo-badge {
+  position:absolute;
+  top:32px;
+  left:32px;
+  width:106px;
+  height:106px;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,0.5));
+}
+.logo-badge img { width:100%; height:100%; display:block; }
+.date {
+  font-family:'Noto Sans Bengali', sans-serif;
+  font-size:16px;
+  font-weight:600;
+  letter-spacing:0.5px;
+  color:#a8a8a8;
+}
+</style>
+</head>
 <body>
-<div class="imgwrap">
-  <img class="news" src="{{ image_data_uri }}">
-  {% if logo_data_uri %}<img class="logo" src="{{ logo_data_uri }}">{% endif %}
+<div class="card">
+  <div class="image-wrap">
+    <img class="card-image" src="{{ image_data_uri }}" alt="news">
+    {% if logo_data_uri %}<div class="logo-badge"><img src="{{ logo_data_uri }}" alt="logo"></div>{% endif %}
+  </div>
+  <div class="rule"></div>
+  <div class="content">
+    <div class="category">{{ category }}</div>
+    <div class="headline">{{ title }}</div>
+    <div class="meta">
+      <div class="date">{{ date }}</div>
+    </div>
+  </div>
 </div>
-<div class="body">
-  <span class="badge">{{ category }}</span>
-  <div class="title">{{ title }}</div>
-  <div class="footer"><span>{{ date }}</span><span class="dot"></span></div>
-</div>
-</body></html>"""
+</body>
+</html>"""
 
 def image_to_base64(path):
     with open(path, "rb") as f:
@@ -480,10 +574,10 @@ def create_news_card(browser, title, img_path, out_path, category, date_str, log
         page.wait_for_load_state("networkidle")
         # ফন্ট force-load — যেন রানার-এ কখনো fallback ফন্ট না আসে
         page.evaluate("""() => Promise.all([
-            document.fonts.load('700 50px "Hind Siliguri"'),
-            document.fonts.load('600 30px "Hind Siliguri"'),
-            document.fonts.load('500 27px "Hind Siliguri"'),
-            document.fonts.load('400 27px "Hind Siliguri"')
+            document.fonts.load('700 58px "Noto Serif Bengali"'),
+            document.fonts.load('600 58px "Noto Serif Bengali"'),
+            document.fonts.load('700 22px "Noto Sans Bengali"'),
+            document.fonts.load('600 16px "Noto Sans Bengali"')
         ]).then(() => true)""")
         page.wait_for_timeout(500)
         page.screenshot(path=out_path, clip={"x": 0, "y": 0, "width": 1080, "height": 1080})
