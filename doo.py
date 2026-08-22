@@ -1,9 +1,15 @@
 """
-স্বয়ংক্রিয় বাংলা নিউজ বট — ৫ সোর্স (sitemap/RSS + og:image) → কার্ড → Facebook Page পোস্ট
-ফিক্স: og:title সাফিক্স ক্লিনআপ, nested playwright নেই।
-নতুন: কার্ড ডিজাইন den.py থেকে হুবহু আনা হয়েছে — ছবি (৬০৮px, ১৬:৯) → পাতলা সাদা
-রুল → কালো ইনভার্টেড ব্লক (Noto Serif Bengali হেডলাইন, সাদা আউটলাইন ক্যাটাগরি-ব্যাজ,
-ধূসর তারিখ) → ছবির উপর ভাসমান ১০৬×১০৬px লোগো (drop-shadow সহ, কোনো সাদা বক্স নেই)।
+স্বয়ংক্রিয় বাংলা নিউজ বট — ৪ সোর্স (সমকাল বাদ — CF 403) → কার্ড → Facebook Page পোস্ট
+
+এই ভার্সনে ৪টা ফিক্স:
+1. সেশন সেভ/রিইউজ — প্রতি সফল পোস্টের পর + রান শেষে context.storage_state() দিয়ে
+   session_state.json-এ সেভ হয়। পরের রানে এই ক্যাশড state আগে ট্রাই হয়, GitHub
+   Secret (SESSION_JSON) শুধু fallback। সেশন dead হলে ক্যাশ মুছে ফেলা হয় যেন
+   পরের রানে fresh Secret কাজ করে। ⚠️ এটা কাজ করতে হলে .yml-এর cache path-এ
+   session_state.json যোগ করতে হবে (নিচে নোট দ্রষ্টব্য)।
+2. timezone_id="Asia/Dhaka" — ফিঙ্গারপ্রিন্ট কনসিস্টেন্সির জন্য বহাল রাখা হলো।
+3. ভিডিও-আর্টিকেল ফিল্টার — og:type=video / og:video / twitter:player মেটা-ট্যাগ
+   বা YouTube/Vimeo থাম্বনেইল প্যাটার্ন থাকলে সেই আর্টিকেল স্কিপ হয়।
 """
 import os, re, json, time, random, hashlib, requests, jinja2, base64, warnings
 import pytz
@@ -29,18 +35,18 @@ POSTED_CACHE = "posted_cache.txt"
 CAPTCHA_LOCK_FILE = "captcha_lock.txt"
 DAILY_LIMIT_FILE = "daily_post_limit.json"
 TOPIC_MEMORY_FILE = "topic_memory.json"
+SESSION_CACHE_FILE = "session_state.json"   # ফিক্স ১: Playwright নেটিভ storage_state ক্যাশ
 MAX_DURATION = 6 * 3600
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
 # ──────────────────────────────────────────────
-# ৫ বাংলা সোর্স
+# ৪ বাংলা সোর্স (সমকাল বাদ — Cloudflare 403)
 # ──────────────────────────────────────────────
 SOURCES = [
     {"name": "ঢাকা পোস্ট", "base": "https://www.dhakapost.com", "kind": "sitemap",
      "maps": ["https://www.dhakapost.com/sitemaps/news-sitemap.xml"]},
     {"name": "আমার দেশ", "base": "https://www.dailyamardesh.com", "kind": "sitemap",
      "maps": ["https://www.dailyamardesh.com/news-sitemap.xml"]},
-    {"name": "সমকাল", "base": "https://samakal.com", "kind": "samakal", "maps": []},
     {"name": "বণিকবার্তা", "base": "https://bonikbarta.com", "kind": "sitemap",
      "maps": ["https://bonikbarta.com/sitemap.xml"]},
     {"name": "ParsToday বাংলা", "base": "https://parstoday.ir", "kind": "rss",
@@ -48,7 +54,7 @@ SOURCES = [
 ]
 
 # ──────────────────────────────────────────────
-# SESSION (Cookie-Editor JSON অথবা Playwright storage_state — দুটোই চলবে)
+# SESSION (ফিক্স ১: cache-first, Secret fallback)
 # ──────────────────────────────────────────────
 def _fix_samesite(v):
     if not v:
@@ -77,6 +83,21 @@ def normalize_cookies(raw):
     return out
 
 def load_session():
+    """১. আগে ক্যাশড session_state.json ট্রাই করা হয় (আগের রানে Playwright নিজে
+    যে state সেভ করেছিল — cookies, tokens, সব আপডেটেড)। এটা already Playwright-এর
+    নেটিভ storage_state ফরম্যাটে থাকে বলে normalize_cookies() লাগে না।
+    ২. ক্যাশ না থাকলে (প্রথম রান, বা dead হওয়ায় মুছে ফেলা হয়েছে) GitHub Secret
+    (SESSION_JSON)-এর Cookie-Editor এক্সপোর্ট normalize করে ব্যবহার হয়।"""
+    if os.path.exists(SESSION_CACHE_FILE):
+        try:
+            with open(SESSION_CACHE_FILE, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            if cached.get("cookies"):
+                print(f"✅ ক্যাশড সেশন ব্যবহার হচ্ছে: {len(cached['cookies'])} cookies")
+                return cached
+        except Exception as e:
+            print(f"⚠️ ক্যাশড সেশন পড়তে সমস্যা, Secret-এ fallback: {e}")
+
     data = None
     s = os.environ.get("SESSION_JSON")
     if s:
@@ -93,15 +114,32 @@ def load_session():
     if data is None:
         return None
     cookies = normalize_cookies(data)
-    print(f"✅ Session normalized: {len(cookies)} cookies")
+    print(f"✅ Secret থেকে সেশন normalized: {len(cookies)} cookies")
     return {"cookies": cookies, "origins": []}
 
 def validate_session():
-    sess = load_session()
-    if not sess or not sess["cookies"]:
-        print("❌ No session found (SESSION_JSON). Bot stopped.")
+    if os.path.exists(SESSION_CACHE_FILE):
+        return True
+    if not os.environ.get("SESSION_JSON") and not os.path.exists("session.json"):
+        print("❌ No session found (ক্যাশ নেই, SESSION_JSON-ও নেই). Bot stopped.")
         return False
     return True
+
+def save_session_cache(context, label=""):
+    """context.storage_state() দিয়ে বর্তমান সেশন (আপডেটেড কুকি/টোকেনসহ) ফাইলে সেভ।
+    পরের রানে load_session() এটাকে Secret-এর চেয়ে বেশি প্রায়োরিটি দেবে।"""
+    try:
+        context.storage_state(path=SESSION_CACHE_FILE)
+        print(f"💾 সেশন ক্যাশ সেভ হলো{(' — ' + label) if label else ''}")
+    except Exception as e:
+        print(f"⚠️ সেশন ক্যাশ সেভ ব্যর্থ: {e}")
+
+def clear_session_cache():
+    """সেশন dead হলে পুরনো ক্যাশ মুছে ফেলা হয়, যেন পরের রানে load_session()
+    বাধ্য হয়ে fresh GitHub Secret ব্যবহার করে — নাহলে বারবার একই মৃত ক্যাশ লোড হতো।"""
+    if os.path.exists(SESSION_CACHE_FILE):
+        os.remove(SESSION_CACHE_FILE)
+        print("🗑️ পুরনো সেশন ক্যাশ মুছে ফেলা হলো — পরের রানে fresh Secret ব্যবহার হবে")
 
 # ──────────────────────────────────────────────
 # CHECKPOINT / SESSION-DEAD LOCK
@@ -199,7 +237,7 @@ def increment_daily_counter():
     return count >= target
 
 # ──────────────────────────────────────────────
-# TOPIC MEMORY (বাংলা stem সহ)
+# TOPIC MEMORY
 # ──────────────────────────────────────────────
 STOPWORDS = {
     "এর", "এবং", "ও", "বা", "যে", "কি", "না", "হয়", "হলো", "ছিল", "আছে",
@@ -318,13 +356,7 @@ def parse_rss(xml):
 
 def get_source_urls(src):
     out = []
-    if src["kind"] == "samakal":
-        for delta in (0, 1):
-            d = (datetime.now(BD_TZ) - timedelta(days=delta)).strftime("%Y-%m-%d")
-            xml = fetch_text(f"https://samakal.com/sitemap/sitemap-daily-{d}.xml")
-            if xml:
-                out += parse_sitemap(xml)[0]
-    elif src["kind"] == "rss":
+    if src["kind"] == "rss":
         xml = fetch_text(src["maps"][0])
         if xml:
             out = parse_rss(xml)
@@ -346,11 +378,6 @@ def get_source_urls(src):
 # og:title + og:image
 # ──────────────────────────────────────────────
 def clean_og_title(title):
-    """og:title-এ সাইট নিজে যে সাফিক্স জুড়ে দেয় (' | সাইট নাম', ' - সাইট নাম',
-    ' – সাইট নাম' ইত্যাদি) তা বাদ দেওয়া হয়। এই সাফিক্স ক্যাপশনে গেলে দেখতে খারাপ
-    লাগে, আর keyword-এ ঢুকে গেলে is_similar_topic() ভুলভাবে সব আর্টিকেলকে
-    "একই টপিক" ধরে ফেলে (কারণ সাইটের নামটাই প্রতিবার মিলে যায়)।
-    সবচেয়ে লম্বা অংশটা রাখা হয় যাতে টাইটেলে '|' বা '-' থাকলেও ভুলে ছোট না হয়ে যায়।"""
     if not title:
         return title
     parts = re.split(r'\s[|\-–—]\s', title)
@@ -359,11 +386,25 @@ def clean_og_title(title):
         title = max(parts, key=len)
     return title.strip()
 
+VIDEO_THUMB_HOSTS = ("ytimg.com", "youtube.com", "youtu.be", "vimeocdn.com", "i.vimeocdn.com")
+
 def fetch_og(url):
+    """ফিক্স ৩: ভিডিও-আর্টিকেল ফিল্টার — og:type=video, og:video[:url], twitter:player
+    মেটা-ট্যাগ থাকলে বা ছবির URL YouTube/Vimeo থাম্বনেইল হোস্টের হলে None রিটার্ন
+    (কার্ডে ভিডিও-থাম্বনেইল বসানো এড়াতে)।"""
     html = fetch_text(url)
     if not html:
         return None
     soup = BeautifulSoup(html, "html.parser")
+
+    og_type = soup.find("meta", property="og:type")
+    if og_type and (og_type.get("content") or "").strip().lower() == "video":
+        return None
+    if soup.find("meta", property="og:video") or soup.find("meta", property="og:video:url"):
+        return None
+    if soup.find("meta", attrs={"name": "twitter:player"}):
+        return None
+
     t = soup.find("meta", property="og:title")
     i = soup.find("meta", property="og:image")
     if not (t and i):
@@ -372,6 +413,10 @@ def fetch_og(url):
     img = (i.get("content") or "").strip()
     if not title or not img:
         return None
+
+    if any(host in img for host in VIDEO_THUMB_HOSTS):
+        return None
+
     title = clean_og_title(title)
     if img.startswith("//"):
         img = "https:" + img
@@ -411,7 +456,7 @@ def pick_article(posted_cache, failed):
     return None
 
 # ──────────────────────────────────────────────
-# IMAGE + CARD (den.py ডিজাইন — কালো ইনভার্টেড ব্লক, সেরিফ হেডলাইন, ভাসমান লোগো)
+# IMAGE + CARD
 # ──────────────────────────────────────────────
 def download_image(url, fname, referer=None):
     headers = dict(HDR)
@@ -439,89 +484,18 @@ CARD_TEMPLATE_HTML = """<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+Bengali:wght@400;600;700&family=Noto+Sans+Bengali:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
-body { width: 1080px; height: 1080px; background:#fff; display:flex; align-items:center; justify-content:center; }
-
-.card {
-  width: 1080px; height: 1080px;
-  background:#fff;
-  display:flex;
-  flex-direction:column;
-  position:relative;
-}
-
-/* ---- image, fixed to a 16:9 box ---- */
-.image-wrap {
-  width:100%;
-  height:608px;         /* 1080 x 608 ≈ 16:9 */
-  position:relative;
-  overflow:hidden;
-  background:#000;      /* letterbox colour if an image doesn't fill the box */
-  flex-shrink:0;
-}
-.card-image {
-  width:100%; height:100%;
-  object-fit:cover;
-  object-position: center 25%;   /* nudge up/down per photo if a face gets cropped */
-  display:block;
-}
-/* ---- divider ---- */
+body { width:1080px; height:1080px; background:#fff; display:flex; align-items:center; justify-content:center; }
+.card { width:1080px; height:1080px; background:#fff; display:flex; flex-direction:column; position:relative; }
+.image-wrap { width:100%; height:608px; position:relative; overflow:hidden; background:#000; flex-shrink:0; }
+.card-image { width:100%; height:100%; object-fit:cover; object-position:center 25%; display:block; }
 .rule { height:2px; background:#fff; flex-shrink:0; }
-
-/* ---- text block (inverted: black ground, white ink) ---- */
-.content {
-  flex:1;
-  background:#000;
-  padding:44px 64px 40px;
-  display:flex;
-  flex-direction:column;
-  justify-content:space-between;
-}
-
-.category {
-  align-self:flex-start;
-  font-family:'Noto Sans Bengali', sans-serif;
-  font-size:22px;
-  font-weight:700;
-  letter-spacing:1.5px;
-  color:#fff;
-  border:1.5px solid #fff;
-  padding:9px 22px;
-  margin-bottom:28px;
-}
-
-.headline {
-  font-family:'Noto Serif Bengali', serif;
-  font-size:58px;
-  font-weight:700;
-  line-height:1.35;
-  color:#fff;
-  flex:1;
-}
-
-.meta {
-  display:flex;
-  align-items:center;
-  justify-content:flex-end;
-  padding-top:22px;
-  border-top:1px solid #fff;
-  margin-top:24px;
-}
-.logo-badge {
-  position:absolute;
-  top:32px;
-  left:32px;
-  width:106px;
-  height:106px;
-  filter: drop-shadow(0 2px 8px rgba(0,0,0,0.5));
-}
-.logo-badge img { width:100%; height:100%; display:block; }
-.date {
-  font-family:'Noto Sans Bengali', sans-serif;
-  font-size:16px;
-  font-weight:600;
-  letter-spacing:0.5px;
-  color:#a8a8a8;
-}
+.content { flex:1; background:#000; padding:44px 64px 40px; display:flex; flex-direction:column; justify-content:space-between; }
+.category { align-self:flex-start; font-family:'Noto Sans Bengali',sans-serif; font-size:22px; font-weight:700; letter-spacing:1.5px; color:#fff; border:1.5px solid #fff; padding:9px 22px; margin-bottom:28px; }
+.headline { font-family:'Noto Serif Bengali',serif; font-size:58px; font-weight:700; line-height:1.35; color:#fff; flex:1; display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
+.meta { display:flex; align-items:center; justify-content:flex-end; padding-top:22px; border-top:1px solid #fff; margin-top:24px; }
+.logo-badge { position:absolute; top:32px; left:32px; width:106px; height:106px; filter:drop-shadow(0 2px 8px rgba(0,0,0,0.5)); }
+.logo-badge img { width:100%; height:100%; object-fit:contain; display:block; }
+.date { font-family:'Noto Sans Bengali',sans-serif; font-size:18px; font-weight:600; letter-spacing:0.5px; color:#a8a8a8; }
 </style>
 </head>
 <body>
@@ -534,9 +508,7 @@ body { width: 1080px; height: 1080px; background:#fff; display:flex; align-items
   <div class="content">
     <div class="category">{{ category }}</div>
     <div class="headline">{{ title }}</div>
-    <div class="meta">
-      <div class="date">{{ date }}</div>
-    </div>
+    <div class="meta"><div class="date">{{ date }}</div></div>
   </div>
 </div>
 </body>
@@ -559,7 +531,6 @@ def bengali_date_today():
     return f"{day} {months[now.month]} {year}"
 
 def create_news_card(browser, title, img_path, out_path, category, date_str, logo_path=None):
-    """কার্ড রেন্ডার — মেইন ব্রাউজারেই নতুন পেজ খুলে (nested sync_playwright নয়)"""
     logo_uri = ""
     if logo_path and os.path.exists(logo_path):
         logo_uri = image_to_base64(logo_path)
@@ -572,12 +543,11 @@ def create_news_card(browser, title, img_path, out_path, category, date_str, log
     try:
         page.goto(f"file://{os.path.abspath('temp_card.html')}")
         page.wait_for_load_state("networkidle")
-        # ফন্ট force-load — যেন রানার-এ কখনো fallback ফন্ট না আসে
         page.evaluate("""() => Promise.all([
             document.fonts.load('700 58px "Noto Serif Bengali"'),
             document.fonts.load('600 58px "Noto Serif Bengali"'),
             document.fonts.load('700 22px "Noto Sans Bengali"'),
-            document.fonts.load('600 16px "Noto Sans Bengali"')
+            document.fonts.load('600 18px "Noto Sans Bengali"')
         ]).then(() => true)""")
         page.wait_for_timeout(500)
         page.screenshot(path=out_path, clip={"x": 0, "y": 0, "width": 1080, "height": 1080})
@@ -609,7 +579,7 @@ def human_type(element, text):
     time.sleep(random.uniform(0.5, 1.2))
 
 # ──────────────────────────────────────────────
-# FACEBOOK POSTING (Create post → Next → Post)
+# FACEBOOK POSTING
 # ──────────────────────────────────────────────
 def post_to_facebook(page, caption, image_path):
     try:
@@ -624,7 +594,6 @@ def post_to_facebook(page, caption, image_path):
             page.mouse.wheel(0, random.randint(300, 600))
             time.sleep(random.uniform(0.5, 1.2))
 
-        # ১. কম্পোজার খোলা — span-এর visible text "What's on your mind?"
         trigger = page.get_by_text("What's on your mind?", exact=True).first
         trigger.wait_for(timeout=20000)
         box = trigger.bounding_box()
@@ -633,12 +602,10 @@ def post_to_facebook(page, caption, image_path):
         page.wait_for_timeout(random.randint(1500, 2500))
         page.wait_for_selector('div[role="dialog"]', timeout=15000)
 
-        # ২. ক্যাপশন টাইপ
         tbox = page.wait_for_selector('div[role="dialog"] div[role="textbox"]', timeout=15000)
         human_type(tbox, caption)
         page.wait_for_timeout(random.randint(800, 1500))
 
-        # ৩. ছবি যুক্ত করা
         photo_btn = page.wait_for_selector(
             'div[role="dialog"] div[aria-label="Photo/video"]', timeout=15000)
         with page.expect_file_chooser(timeout=15000) as fc:
@@ -652,7 +619,6 @@ def post_to_facebook(page, caption, image_path):
             page.wait_for_timeout(5000)
         page.wait_for_timeout(random.randint(2500, 4500))
 
-        # ৪. Next
         try:
             next_btn = page.wait_for_selector(
                 'div[role="dialog"] div[role="button"]:has(span:text-is("Next"))', timeout=10000)
@@ -663,7 +629,6 @@ def post_to_facebook(page, caption, image_path):
         next_btn.click()
         page.wait_for_timeout(random.randint(2000, 3500))
 
-        # ৫. Post settings → Post
         post_btn = page.wait_for_selector(
             'div[role="dialog"] div[aria-label="Post"][role="button"]', timeout=15000)
         box = post_btn.bounding_box()
@@ -685,7 +650,7 @@ def post_to_facebook(page, caption, image_path):
         return "fail"
 
 # ──────────────────────────────────────────────
-# HUMAN DELAY (40-48 posts/day)
+# HUMAN DELAY
 # ──────────────────────────────────────────────
 def human_delay(hour):
     if 6 <= hour < 10:
@@ -745,12 +710,14 @@ def run_bot_loop():
                   "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--use-gl=egl"])
         context = browser.new_context(
             storage_state=load_session(), user_agent=UA,
-            viewport={'width': 1920, 'height': 1080}, locale="en-US")
+            viewport={'width': 1920, 'height': 1080}, locale="en-US",
+            timezone_id="Asia/Dhaka")
         page = context.new_page()
         page.add_init_script(ANTI_DETECT)
 
         print(f"\n🤖 FB News Bot started — {datetime.now(BD_TZ).strftime('%Y-%m-%d %H:%M:%S')} (BD)")
         iteration = 0
+        session_died = False
         while True:
             target, current = get_daily_limit()
             if current >= target:
@@ -785,6 +752,7 @@ def run_bot_loop():
             result = post_to_facebook(page, art["title"], "card_output.jpg")
             if result == "dead":
                 print("🔐 Session dead — stopping run. নতুন কুকি আপলোড করুন।")
+                session_died = True
                 break
             if result == "locked":
                 break
@@ -795,6 +763,9 @@ def run_bot_loop():
                 add_to_topic_memory(art["title"])
                 trim_cache(POSTED_CACHE)
                 print("✅ Posted!")
+                # ফিক্স ১: প্রতি সফল পোস্টের পর সেশন ক্যাশ আপডেট — Facebook
+                # ব্যবহারের সময় টোকেন রোটেট করলে সেটাও ধরা থাকবে।
+                save_session_cache(context, label=f"post #{iteration}")
                 if increment_daily_counter():
                     break
                 delay = human_delay(datetime.now(BD_TZ).hour)
@@ -803,6 +774,13 @@ def run_bot_loop():
                 delay = random.randint(90, 180)
             print(f"⏳ Next in {delay // 60}m...")
             time.sleep(delay)
+
+        # ফিক্স ১: রান শেষে (সফল/ব্যর্থ যাই হোক) চূড়ান্ত state সেভ — ব্যতিক্রম
+        # শুধু সেশন dead হলে, তখন ক্যাশ মুছে ফেলা হয় যেন পরের রান fresh Secret নেয়।
+        if session_died:
+            clear_session_cache()
+        else:
+            save_session_cache(context, label="run end")
 
         browser.close()
     print("\n🔒 Browser closed. Loop ended.")
