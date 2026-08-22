@@ -391,30 +391,39 @@ VIDEO_THUMB_HOSTS = ("ytimg.com", "youtube.com", "youtu.be", "vimeocdn.com", "i.
 def fetch_og(url):
     """ফিক্স ৩: ভিডিও-আর্টিকেল ফিল্টার — og:type=video, og:video[:url], twitter:player
     মেটা-ট্যাগ থাকলে বা ছবির URL YouTube/Vimeo থাম্বনেইল হোস্টের হলে None রিটার্ন
-    (কার্ডে ভিডিও-থাম্বনেইল বসানো এড়াতে)।"""
+    (কার্ডে ভিডিও-থাম্বনেইল বসানো এড়াতে)।
+    ডায়াগনস্টিক: ঠিক কোন কারণে None রিটার্ন হলো তা এখন প্রিন্ট হয় — নাহলে
+    pick_article()-এ candidate silently বাদ পড়ে যায়, কারণ বোঝার উপায় থাকে না।"""
     html = fetch_text(url)
     if not html:
+        print(f"  ⚠️ page fetch failed: {url}")
         return None
     soup = BeautifulSoup(html, "html.parser")
 
     og_type = soup.find("meta", property="og:type")
     if og_type and (og_type.get("content") or "").strip().lower() == "video":
+        print(f"  🎬 video (og:type) skip: {url}")
         return None
     if soup.find("meta", property="og:video") or soup.find("meta", property="og:video:url"):
+        print(f"  🎬 video (og:video tag) skip: {url}")
         return None
     if soup.find("meta", attrs={"name": "twitter:player"}):
+        print(f"  🎬 video (twitter:player) skip: {url}")
         return None
 
     t = soup.find("meta", property="og:title")
     i = soup.find("meta", property="og:image")
     if not (t and i):
+        print(f"  ⚠️ og:title/og:image ট্যাগ অনুপস্থিত: {url}")
         return None
     title = (t.get("content") or "").strip()
     img = (i.get("content") or "").strip()
     if not title or not img:
+        print(f"  ⚠️ og:title/og:image ফাঁকা: {url}")
         return None
 
     if any(host in img for host in VIDEO_THUMB_HOSTS):
+        print(f"  🎬 video (থাম্বনেইল হোস্ট) skip: {url}")
         return None
 
     title = clean_og_title(title)
@@ -440,6 +449,7 @@ def pick_article(posted_cache, failed):
             if dt and (now - dt).total_seconds() > 24 * 3600:
                 continue
             if not robots_allow(src["base"], link):
+                print(f"  🚫 robots.txt ব্লক: {link}")
                 continue
             og = fetch_og(link)
             if not og:
