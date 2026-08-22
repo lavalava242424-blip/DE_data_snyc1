@@ -1,11 +1,14 @@
 name: Run FB News Bot
+
 on:
   workflow_dispatch:
   repository_dispatch:
     types: [run-bot]
+
 concurrency:
   group: fb-news-bot-group
   cancel-in-progress: false
+
 jobs:
   run-bot:
     runs-on: ubuntu-22.04
@@ -13,21 +16,25 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
           playwright install --with-deps chrome
           sudo apt-get install -y xvfb
+
       - name: Restore bot cache
         uses: actions/cache@v4
         with:
@@ -36,9 +43,11 @@ jobs:
             captcha_lock.txt
             daily_post_limit.json
             topic_memory.json
+            session_state.json
           key: bot-cache-${{ github.run_id }}
           restore-keys: |
             bot-cache-
+
       - name: Run bot
         env:
           SESSION_JSON: ${{ secrets.SESSION_JSON }}
@@ -46,6 +55,7 @@ jobs:
           HEADLESS: false
           PYTHONUNBUFFERED: 1
         run: xvfb-run python doo.py
+
       - name: Save bot cache
         if: always()
         uses: actions/cache/save@v4
@@ -55,7 +65,9 @@ jobs:
             captcha_lock.txt
             daily_post_limit.json
             topic_memory.json
+            session_state.json
           key: bot-cache-${{ github.run_id }}
+
       - name: Upload debug screenshots
         if: always()
         uses: actions/upload-artifact@v4
