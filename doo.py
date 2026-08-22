@@ -1,44 +1,38 @@
 """
 স্বয়ংক্রিয় বাংলা নিউজ বট — ৪ সোর্স (সমকাল বাদ — CF 403) → কার্ড → Facebook Page পোস্ট
-
-এই ভার্সনে ৪টা ফিক্স:
-1. সেশন সেভ/রিইউজ — প্রতি সফল পোস্টের পর + রান শেষে context.storage_state() দিয়ে
+এই ভার্সনে ৪টা ফিক্স + robots.txt চেক বাদ:
+১. সেশন সেভ/রিইউজ — প্রতি সফল পোস্টের পর + রান শেষে context.storage_state() দিয়ে
    session_state.json-এ সেভ হয়। পরের রানে এই ক্যাশড state আগে ট্রাই হয়, GitHub
    Secret (SESSION_JSON) শুধু fallback। সেশন dead হলে ক্যাশ মুছে ফেলা হয় যেন
    পরের রানে fresh Secret কাজ করে। ⚠️ এটা কাজ করতে হলে .yml-এর cache path-এ
-   session_state.json যোগ করতে হবে (নিচে নোট দ্রষ্টব্য)।
-2. timezone_id="Asia/Dhaka" — ফিঙ্গারপ্রিন্ট কনসিস্টেন্সির জন্য বহাল রাখা হলো।
-3. ভিডিও-আর্টিকেল ফিল্টার — og:type=video / og:video / twitter:player মেটা-ট্যাগ
+   session_state.json যোগ করতে হবে।
+২. timezone_id="Asia/Dhaka" — ফিঙ্গারপ্রিন্ট কনসিস্টেন্সি।
+৩. ভিডিও-আর্টিকেল ফিল্টার — og:type=video / og:video / twitter:player মেটা-ট্যাগ
    বা YouTube/Vimeo থাম্বনেইল প্যাটার্ন থাকলে সেই আর্টিকেল স্কিপ হয়।
+৪. robots.txt চেক সম্পূর্ণ বাদ — ঢাকা পোস্টসহ সব সোর্স আনব্লক।
 """
 import os, re, json, time, random, hashlib, requests, jinja2, base64, warnings
 import pytz
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
-from urllib.robotparser import RobotFileParser
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from playwright.sync_api import sync_playwright
-
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
-
 BD_TZ = pytz.timezone("Asia/Dhaka")
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
 HDR = {"User-Agent": UA, "Accept-Language": "bn,en;q=0.9,en;q=0.8"}
-
 FB_PAGE_ID = os.environ.get("FB_PAGE_ID", "100089034123367")
 CARD_CATEGORY = os.environ.get("CARD_CATEGORY", "সর্বশেষ")
-
 MEDIA_DIR = "downloaded_media"
 POSTED_CACHE = "posted_cache.txt"
 CAPTCHA_LOCK_FILE = "captcha_lock.txt"
 DAILY_LIMIT_FILE = "daily_post_limit.json"
 TOPIC_MEMORY_FILE = "topic_memory.json"
-SESSION_CACHE_FILE = "session_state.json"   # ফিক্স ১: Playwright নেটিভ storage_state ক্যাশ
+SESSION_CACHE_FILE = "session_state.json"
 MAX_DURATION = 6 * 3600
 os.makedirs(MEDIA_DIR, exist_ok=True)
-
 # ──────────────────────────────────────────────
 # ৪ বাংলা সোর্স (সমকাল বাদ — Cloudflare 403)
 # ──────────────────────────────────────────────
@@ -52,7 +46,6 @@ SOURCES = [
     {"name": "ParsToday বাংলা", "base": "https://parstoday.ir", "kind": "rss",
      "maps": ["https://parstoday.ir/bn/rss"]},
 ]
-
 # ──────────────────────────────────────────────
 # SESSION (ফিক্স ১: cache-first, Secret fallback)
 # ──────────────────────────────────────────────
@@ -61,7 +54,6 @@ def _fix_samesite(v):
         return None
     return {"strict": "Strict", "lax": "Lax", "none": "None",
             "no_restriction": "None"}.get(str(v).lower())
-
 def normalize_cookies(raw):
     cookies = raw.get("cookies", []) if isinstance(raw, dict) else raw
     out = []
@@ -81,13 +73,7 @@ def normalize_cookies(raw):
         except Exception:
             continue
     return out
-
 def load_session():
-    """১. আগে ক্যাশড session_state.json ট্রাই করা হয় (আগের রানে Playwright নিজে
-    যে state সেভ করেছিল — cookies, tokens, সব আপডেটেড)। এটা already Playwright-এর
-    নেটিভ storage_state ফরম্যাটে থাকে বলে normalize_cookies() লাগে না।
-    ২. ক্যাশ না থাকলে (প্রথম রান, বা dead হওয়ায় মুছে ফেলা হয়েছে) GitHub Secret
-    (SESSION_JSON)-এর Cookie-Editor এক্সপোর্ট normalize করে ব্যবহার হয়।"""
     if os.path.exists(SESSION_CACHE_FILE):
         try:
             with open(SESSION_CACHE_FILE, "r", encoding="utf-8") as f:
@@ -97,7 +83,6 @@ def load_session():
                 return cached
         except Exception as e:
             print(f"⚠️ ক্যাশড সেশন পড়তে সমস্যা, Secret-এ fallback: {e}")
-
     data = None
     s = os.environ.get("SESSION_JSON")
     if s:
@@ -116,7 +101,6 @@ def load_session():
     cookies = normalize_cookies(data)
     print(f"✅ Secret থেকে সেশন normalized: {len(cookies)} cookies")
     return {"cookies": cookies, "origins": []}
-
 def validate_session():
     if os.path.exists(SESSION_CACHE_FILE):
         return True
@@ -124,23 +108,16 @@ def validate_session():
         print("❌ No session found (ক্যাশ নেই, SESSION_JSON-ও নেই). Bot stopped.")
         return False
     return True
-
 def save_session_cache(context, label=""):
-    """context.storage_state() দিয়ে বর্তমান সেশন (আপডেটেড কুকি/টোকেনসহ) ফাইলে সেভ।
-    পরের রানে load_session() এটাকে Secret-এর চেয়ে বেশি প্রায়োরিটি দেবে।"""
     try:
         context.storage_state(path=SESSION_CACHE_FILE)
         print(f"💾 সেশন ক্যাশ সেভ হলো{(' — ' + label) if label else ''}")
     except Exception as e:
         print(f"⚠️ সেশন ক্যাশ সেভ ব্যর্থ: {e}")
-
 def clear_session_cache():
-    """সেশন dead হলে পুরনো ক্যাশ মুছে ফেলা হয়, যেন পরের রানে load_session()
-    বাধ্য হয়ে fresh GitHub Secret ব্যবহার করে — নাহলে বারবার একই মৃত ক্যাশ লোড হতো।"""
     if os.path.exists(SESSION_CACHE_FILE):
         os.remove(SESSION_CACHE_FILE)
         print("🗑️ পুরনো সেশন ক্যাশ মুছে ফেলা হলো — পরের রানে fresh Secret ব্যবহার হবে")
-
 # ──────────────────────────────────────────────
 # CHECKPOINT / SESSION-DEAD LOCK
 # ──────────────────────────────────────────────
@@ -155,12 +132,10 @@ def is_captcha_locked():
         return True
     os.remove(CAPTCHA_LOCK_FILE)
     return False
-
 def set_captcha_lock():
     with open(CAPTCHA_LOCK_FILE, "w") as f:
         f.write(str(time.time()))
     print("🔒 Lock set for 12h.")
-
 def check_fb_health(page):
     url = page.url.lower()
     if "checkpoint" in url or "challenge" in url:
@@ -181,27 +156,22 @@ def check_fb_health(page):
     except Exception:
         pass
     return "ok"
-
 # ──────────────────────────────────────────────
 # CACHE + DAILY LIMIT
 # ──────────────────────────────────────────────
 def text_hash(text):
     t = re.sub(r'[^\w\s]', '', re.sub(r'\s+', ' ', text.lower().strip()))[:250]
     return hashlib.sha256(t.encode()).hexdigest()[:16]
-
 def load_cache(fp):
     if not os.path.exists(fp):
         return set()
     with open(fp, "r", encoding="utf-8") as f:
         return set(l.strip() for l in f if l.strip())
-
 def save_to_cache(text, fp):
     with open(fp, "a", encoding="utf-8") as f:
         f.write(text_hash(text) + "\n")
-
 def is_duplicate(text, cache):
     return text_hash(text) in cache
-
 def trim_cache(fp, limit=500):
     if not os.path.exists(fp):
         return
@@ -210,7 +180,6 @@ def trim_cache(fp, limit=500):
     if len(lines) > limit:
         with open(fp, "w", encoding="utf-8") as f:
             f.writelines(lines[-limit:])
-
 def get_daily_limit():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if os.path.exists(DAILY_LIMIT_FILE):
@@ -226,7 +195,6 @@ def get_daily_limit():
         json.dump({"date": today, "target": target, "count": 0}, f)
     print(f"📊 New daily target: {target}")
     return target, 0
-
 def increment_daily_counter():
     target, count = get_daily_limit()
     count += 1
@@ -235,7 +203,6 @@ def increment_daily_counter():
                    "target": target, "count": count}, f)
     print(f"📈 Daily count: {count}/{target}")
     return count >= target
-
 # ──────────────────────────────────────────────
 # TOPIC MEMORY
 # ──────────────────────────────────────────────
@@ -248,17 +215,14 @@ STOPWORDS = {
     "the", "is", "at", "which", "on", "a", "an", "and", "or", "but", "in",
     "with", "to", "for", "of", "by", "from", "as", "not", "its", "that",
 }
-
 def stem(w):
     for suf in ["গুলো", "গুলোর", "দের", "দেরকে", "কে", "রে", "ের", "ে", "য়", "টি", "টা", "র", "ই"]:
         if w.endswith(suf) and len(w) - len(suf) >= 3:
             return w[:-len(suf)]
     return w
-
 def extract_keywords(text):
     words = re.findall(r'[\u0980-\u09FFa-zA-Z]+', text.lower())
     return {stem(w) for w in words if w not in STOPWORDS and len(w) > 2}
-
 def load_topic_memory():
     if not os.path.exists(TOPIC_MEMORY_FILE):
         return []
@@ -267,37 +231,23 @@ def load_topic_memory():
             return json.load(f)
     except Exception:
         return []
-
 def save_topic_memory(mem):
     cutoff = time.time() - 6 * 3600
     mem = [m for m in mem if m["time"] > cutoff]
     with open(TOPIC_MEMORY_FILE, "w") as f:
         json.dump(mem, f)
-
 def is_similar_topic(text, mem, min_overlap=2):
     kw = extract_keywords(text)
     return any(len(kw & set(m["keywords"])) >= min_overlap for m in mem)
-
 def add_to_topic_memory(text):
     mem = load_topic_memory()
     mem.append({"time": time.time(), "keywords": list(extract_keywords(text))})
     save_topic_memory(mem)
-
 # ──────────────────────────────────────────────
-# ROBOTS.TXT
+# ROBOTS.TXT — বাদ দেওয়া হয়েছে
 # ──────────────────────────────────────────────
-_ROBOTS = {}
 def robots_allow(base, url):
-    if base not in _ROBOTS:
-        rp = RobotFileParser()
-        rp.set_url(base + "/robots.txt")
-        try:
-            rp.read()
-        except Exception:
-            rp.parse([])
-        _ROBOTS[base] = rp
-    return _ROBOTS[base].can_fetch(UA, url)
-
+    return True   # robots.txt চেক বাদ — সব URL অনুমোদিত
 # ──────────────────────────────────────────────
 # DISCOVERY: sitemap / RSS
 # ──────────────────────────────────────────────
@@ -309,7 +259,6 @@ def fetch_text(url):
     except Exception as e:
         print(f"  ⚠️ fetch fail: {url} ({type(e).__name__})")
     return None
-
 def parse_dt(s):
     if not s:
         return None
@@ -321,7 +270,6 @@ def parse_dt(s):
         return parsedate_to_datetime(s)
     except Exception:
         return None
-
 def parse_sitemap(xml):
     soup = BeautifulSoup(xml, "html.parser")
     urls = []
@@ -338,7 +286,6 @@ def parse_sitemap(xml):
         if loc:
             children.append(loc.get_text(strip=True))
     return urls, children
-
 def parse_rss(xml):
     soup = BeautifulSoup(xml, "html.parser")
     out = []
@@ -353,7 +300,6 @@ def parse_rss(xml):
         d = item.find("pubdate")
         out.append((link, parse_dt(d.get_text(strip=True)) if d else None))
     return out
-
 def get_source_urls(src):
     out = []
     if src["kind"] == "rss":
@@ -373,7 +319,6 @@ def get_source_urls(src):
                     if cxml:
                         out += parse_sitemap(cxml)[0]
     return out
-
 # ──────────────────────────────────────────────
 # og:title + og:image
 # ──────────────────────────────────────────────
@@ -385,21 +330,13 @@ def clean_og_title(title):
         parts = [p.strip() for p in parts if p.strip()]
         title = max(parts, key=len)
     return title.strip()
-
 VIDEO_THUMB_HOSTS = ("ytimg.com", "youtube.com", "youtu.be", "vimeocdn.com", "i.vimeocdn.com")
-
 def fetch_og(url):
-    """ফিক্স ৩: ভিডিও-আর্টিকেল ফিল্টার — og:type=video, og:video[:url], twitter:player
-    মেটা-ট্যাগ থাকলে বা ছবির URL YouTube/Vimeo থাম্বনেইল হোস্টের হলে None রিটার্ন
-    (কার্ডে ভিডিও-থাম্বনেইল বসানো এড়াতে)।
-    ডায়াগনস্টিক: ঠিক কোন কারণে None রিটার্ন হলো তা এখন প্রিন্ট হয় — নাহলে
-    pick_article()-এ candidate silently বাদ পড়ে যায়, কারণ বোঝার উপায় থাকে না।"""
     html = fetch_text(url)
     if not html:
         print(f"  ⚠️ page fetch failed: {url}")
         return None
     soup = BeautifulSoup(html, "html.parser")
-
     og_type = soup.find("meta", property="og:type")
     if og_type and (og_type.get("content") or "").strip().lower() == "video":
         print(f"  🎬 video (og:type) skip: {url}")
@@ -410,7 +347,6 @@ def fetch_og(url):
     if soup.find("meta", attrs={"name": "twitter:player"}):
         print(f"  🎬 video (twitter:player) skip: {url}")
         return None
-
     t = soup.find("meta", property="og:title")
     i = soup.find("meta", property="og:image")
     if not (t and i):
@@ -421,18 +357,15 @@ def fetch_og(url):
     if not title or not img:
         print(f"  ⚠️ og:title/og:image ফাঁকা: {url}")
         return None
-
     if any(host in img for host in VIDEO_THUMB_HOSTS):
         print(f"  🎬 video (থাম্বনেইল হোস্ট) skip: {url}")
         return None
-
     title = clean_og_title(title)
     if img.startswith("//"):
         img = "https:" + img
     elif img.startswith("/"):
         img = urljoin(url, img)
     return title, img
-
 def pick_article(posted_cache, failed):
     now = datetime.now(timezone.utc)
     for src in random.sample(SOURCES, len(SOURCES)):
@@ -464,7 +397,6 @@ def pick_article(posted_cache, failed):
             print(f"  ✅ picked: {title[:60]}")
             return {"title": title, "link": link, "image_url": img, "source": src["name"]}
     return None
-
 # ──────────────────────────────────────────────
 # IMAGE + CARD
 # ──────────────────────────────────────────────
@@ -485,7 +417,6 @@ def download_image(url, fname, referer=None):
     except Exception as e:
         print(f"  ⚠️ Image error: {e}")
     return None
-
 CARD_TEMPLATE_HTML = """<!DOCTYPE html>
 <html lang="bn">
 <head>
@@ -523,14 +454,12 @@ body { width:1080px; height:1080px; background:#fff; display:flex; align-items:c
 </div>
 </body>
 </html>"""
-
 def image_to_base64(path):
     with open(path, "rb") as f:
         data = base64.b64encode(f.read()).decode()
     ext = os.path.splitext(path)[1].lower()
     mime = "image/jpeg" if ext in [".jpg", ".jpeg"] else "image/png"
     return f"data:{mime};base64,{data}"
-
 def bengali_date_today():
     months = {1: "জানুয়ারি", 2: "ফেব্রুয়ারি", 3: "মার্চ", 4: "এপ্রিল", 5: "মে", 6: "জুন",
               7: "জুলাই", 8: "আগস্ট", 9: "সেপ্টেম্বর", 10: "অক্টোবর", 11: "নভেম্বর", 12: "ডিসেম্বর"}
@@ -539,7 +468,6 @@ def bengali_date_today():
     day = "".join(bd[int(d)] for d in str(now.day))
     year = "".join(bd[int(d)] for d in str(now.year))
     return f"{day} {months[now.month]} {year}"
-
 def create_news_card(browser, title, img_path, out_path, category, date_str, logo_path=None):
     logo_uri = ""
     if logo_path and os.path.exists(logo_path):
@@ -564,7 +492,6 @@ def create_news_card(browser, title, img_path, out_path, category, date_str, log
     finally:
         page.close()
     return out_path
-
 # ──────────────────────────────────────────────
 # HUMAN-LIKE MOUSE + TYPING
 # ──────────────────────────────────────────────
@@ -578,7 +505,6 @@ def human_mouse_move(page, tx, ty, steps=15):
         y = (1 - t) ** 2 * sy + 2 * (1 - t) * t * cy + t ** 2 * ty
         page.mouse.move(x, y)
         time.sleep(random.uniform(0.005, 0.015))
-
 def human_type(element, text):
     element.click()
     time.sleep(random.uniform(0.3, 0.8))
@@ -587,7 +513,6 @@ def human_type(element, text):
         if random.random() < 0.05:
             time.sleep(random.uniform(0.3, 0.9))
     time.sleep(random.uniform(0.5, 1.2))
-
 # ──────────────────────────────────────────────
 # FACEBOOK POSTING
 # ──────────────────────────────────────────────
@@ -599,11 +524,9 @@ def post_to_facebook(page, caption, image_path):
         status = check_fb_health(page)
         if status != "ok":
             return status
-
         for _ in range(random.randint(1, 3)):
             page.mouse.wheel(0, random.randint(300, 600))
             time.sleep(random.uniform(0.5, 1.2))
-
         trigger = page.get_by_text("What's on your mind?", exact=True).first
         trigger.wait_for(timeout=20000)
         box = trigger.bounding_box()
@@ -611,11 +534,9 @@ def post_to_facebook(page, caption, image_path):
         trigger.click()
         page.wait_for_timeout(random.randint(1500, 2500))
         page.wait_for_selector('div[role="dialog"]', timeout=15000)
-
         tbox = page.wait_for_selector('div[role="dialog"] div[role="textbox"]', timeout=15000)
         human_type(tbox, caption)
         page.wait_for_timeout(random.randint(800, 1500))
-
         photo_btn = page.wait_for_selector(
             'div[role="dialog"] div[aria-label="Photo/video"]', timeout=15000)
         with page.expect_file_chooser(timeout=15000) as fc:
@@ -628,7 +549,6 @@ def post_to_facebook(page, caption, image_path):
         except Exception:
             page.wait_for_timeout(5000)
         page.wait_for_timeout(random.randint(2500, 4500))
-
         try:
             next_btn = page.wait_for_selector(
                 'div[role="dialog"] div[role="button"]:has(span:text-is("Next"))', timeout=10000)
@@ -638,14 +558,12 @@ def post_to_facebook(page, caption, image_path):
         human_mouse_move(page, box['x'] + box['width'] // 2, box['y'] + box['height'] // 2)
         next_btn.click()
         page.wait_for_timeout(random.randint(2000, 3500))
-
         post_btn = page.wait_for_selector(
             'div[role="dialog"] div[aria-label="Post"][role="button"]', timeout=15000)
         box = post_btn.bounding_box()
         human_mouse_move(page, box['x'] + box['width'] // 2, box['y'] + box['height'] // 2)
         post_btn.click()
         page.wait_for_timeout(random.randint(4000, 6000))
-
         if page.query_selector('div[role="dialog"]'):
             print("  ⚠️ dialog still open after Post")
             page.screenshot(path=f"fb_debug_{int(time.time())}.png")
@@ -658,7 +576,6 @@ def post_to_facebook(page, caption, image_path):
         except Exception:
             pass
         return "fail"
-
 # ──────────────────────────────────────────────
 # HUMAN DELAY
 # ──────────────────────────────────────────────
@@ -672,7 +589,6 @@ def human_delay(hour):
     else:
         base = random.randint(30, 45) * 60
     return base
-
 ANTI_DETECT = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
@@ -694,7 +610,6 @@ window.navigator.permissions.query = (parameters) => (
         originalQuery(parameters)
 );
 """
-
 # ──────────────────────────────────────────────
 # MAIN LOOP
 # ──────────────────────────────────────────────
@@ -707,11 +622,9 @@ def run_bot_loop():
     if current >= target:
         print("🎯 Daily limit already reached.")
         return
-
     start_time = time.time()
     failed = set()
     logo_path = os.environ.get("LOGO_PATH", "logo.png")
-
     with sync_playwright() as p:
         headless = os.environ.get("HEADLESS", "false").lower() == "true"
         browser = p.chromium.launch(
@@ -724,7 +637,6 @@ def run_bot_loop():
             timezone_id="Asia/Dhaka")
         page = context.new_page()
         page.add_init_script(ANTI_DETECT)
-
         print(f"\n🤖 FB News Bot started — {datetime.now(BD_TZ).strftime('%Y-%m-%d %H:%M:%S')} (BD)")
         iteration = 0
         session_died = False
@@ -738,27 +650,22 @@ def run_bot_loop():
                 break
             if is_captcha_locked():
                 break
-
             iteration += 1
             print(f"\n🔄 Iteration {iteration} — {datetime.now(BD_TZ).strftime('%H:%M:%S')} (BD)")
             posted_cache = load_cache(POSTED_CACHE)
             art = pick_article(posted_cache, failed)
-
             if not art:
                 print("⚠️ No new article. Sleeping 5m.")
                 time.sleep(300)
                 continue
-
             img_file = download_image(art["image_url"], "temp_news.jpg", referer=art["link"])
             if not img_file:
                 failed.add(art["link"])
                 time.sleep(60)
                 continue
-
             create_news_card(browser, art["title"], img_file, "card_output.jpg",
                              CARD_CATEGORY, bengali_date_today(), logo_path)
             print("🖼️ Card created")
-
             result = post_to_facebook(page, art["title"], "card_output.jpg")
             if result == "dead":
                 print("🔐 Session dead — stopping run. নতুন কুকি আপলোড করুন।")
@@ -766,15 +673,12 @@ def run_bot_loop():
                 break
             if result == "locked":
                 break
-
             if result == "ok":
                 save_to_cache(art["title"], POSTED_CACHE)
                 save_to_cache(art["link"], POSTED_CACHE)
                 add_to_topic_memory(art["title"])
                 trim_cache(POSTED_CACHE)
                 print("✅ Posted!")
-                # ফিক্স ১: প্রতি সফল পোস্টের পর সেশন ক্যাশ আপডেট — Facebook
-                # ব্যবহারের সময় টোকেন রোটেট করলে সেটাও ধরা থাকবে।
                 save_session_cache(context, label=f"post #{iteration}")
                 if increment_daily_counter():
                     break
@@ -784,17 +688,12 @@ def run_bot_loop():
                 delay = random.randint(90, 180)
             print(f"⏳ Next in {delay // 60}m...")
             time.sleep(delay)
-
-        # ফিক্স ১: রান শেষে (সফল/ব্যর্থ যাই হোক) চূড়ান্ত state সেভ — ব্যতিক্রম
-        # শুধু সেশন dead হলে, তখন ক্যাশ মুছে ফেলা হয় যেন পরের রান fresh Secret নেয়।
         if session_died:
             clear_session_cache()
         else:
             save_session_cache(context, label="run end")
-
         browser.close()
     print("\n🔒 Browser closed. Loop ended.")
-
 if __name__ == "__main__":
     delay = random.randint(60, 180)
     print(f"⏱ {delay}s initial delay...")
