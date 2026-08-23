@@ -1,15 +1,17 @@
 """
-স্বয়ংক্রিয় বাংলা নিউজ বট — ৪ সোর্স (সমকাল বাদ — CF 403) → কার্ড → Facebook Page পোস্ট
-
-এই ভার্সনে ৪টা ফিক্স:
-1. সেশন সেভ/রিইউজ — প্রতি সফল পোস্টের পর + রান শেষে context.storage_state() দিয়ে
-   session_state.json-এ সেভ হয়। পরের রানে এই ক্যাশড state আগে ট্রাই হয়, GitHub
-   Secret (SESSION_JSON) শুধু fallback। সেশন dead হলে ক্যাশ মুছে ফেলা হয় যেন
-   পরের রানে fresh Secret কাজ করে। ⚠️ এটা কাজ করতে হলে .yml-এর cache path-এ
-   session_state.json যোগ করতে হবে (নিচে নোট দ্রষ্টব্য)।
-2. timezone_id="Asia/Dhaka" — ফিঙ্গারপ্রিন্ট কনসিস্টেন্সির জন্য বহাল রাখা হলো।
-3. ভিডিও-আর্টিকেল ফিল্টার — og:type=video / og:video / twitter:player মেটা-ট্যাগ
-   বা YouTube/Vimeo থাম্বনেইল প্যাটার্ন থাকলে সেই আর্টিকেল স্কিপ হয়।
+স্বয়ংক্রিয় বাংলা নিউজ বট — ৪ সোর্স → কার্ড → Facebook Page পোস্ট
+ফিক্স তালিকা:
+১. সেশন সেভ/রিইউজ — প্রতি পোস্টের পর + রান শেষে storage_state ক্যাশ; dead হলে clear।
+২. timezone_id="Asia/Dhaka" — ফিঙ্গারপ্রিন্ট কনসিস্টেন্সি।
+৩. ভিডিও-আর্টিকেল ফিল্টার — og:type/og:video/twitter:player/iframe/থাম্বনেইল হোস্ট।
+৪. robots.txt চেক সম্পূর্ণ বাদ (নিজেদের চেকই সোর্স ব্লক করছিল)।
+৫. RSS সরাসরি title+image (ParsToday) — আর্টিকেল পেজে না গিয়ে RSS ডেটাতেই কার্ড।
+৬. বণিকবার্তা ডিসকভারি ফিক্স — utf-8 encoding force, "sitemap-news" child ফিল্টার,
+   naive datetime → UTC।
+৭. বণিকবার্তা ক্লিন ছবি — og:image-এর ".preview.jpg" → ".jpg" (ব্র্যান্ডেড/লোগো-সহ
+   ভার্সন বাদ, ক্লিন original)। কোনো ফলব্যাক বা বাড়তি রিকোয়েস্ট নেই।
+৮. bengali_date_today()-এর digit-ম্যাপিং বাগ ফিক্স — bd লিস্টে ১/৩/৫ ইনডেক্সে
+   ভুলবশত খালি স্ট্রিং ছিল, ফলে তারিখের ঐ ডিজিটগুলো কার্ড থেকে উধাও হয়ে যেত।
 """
 import os, re, json, time, random, hashlib, requests, jinja2, base64, warnings
 import pytz
@@ -18,7 +20,6 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from playwright.sync_api import sync_playwright
-
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 BD_TZ = pytz.timezone("Asia/Dhaka")
@@ -34,12 +35,12 @@ POSTED_CACHE = "posted_cache.txt"
 CAPTCHA_LOCK_FILE = "captcha_lock.txt"
 DAILY_LIMIT_FILE = "daily_post_limit.json"
 TOPIC_MEMORY_FILE = "topic_memory.json"
-SESSION_CACHE_FILE = "session_state.json"   # ফিক্স ১: Playwright নেটিভ storage_state ক্যাশ
+SESSION_CACHE_FILE = "session_state.json"
 MAX_DURATION = 6 * 3600
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
 # ──────────────────────────────────────────────
-# ৪ বাংলা সোর্স (সমকাল বাদ — Cloudflare 403)
+# ৪ বাংলা সোর্স
 # ──────────────────────────────────────────────
 SOURCES = [
     {"name": "ঢাকা পোস্ট", "base": "https://www.dhakapost.com", "kind": "sitemap",
@@ -82,11 +83,6 @@ def normalize_cookies(raw):
     return out
 
 def load_session():
-    """১. আগে ক্যাশড session_state.json ট্রাই করা হয় (আগের রানে Playwright নিজে
-    যে state সেভ করেছিল — cookies, tokens, সব আপডেটেড)। এটা already Playwright-এর
-    নেটিভ storage_state ফরম্যাটে থাকে বলে normalize_cookies() লাগে না।
-    ২. ক্যাশ না থাকলে (প্রথম রান, বা dead হওয়ায় মুছে ফেলা হয়েছে) GitHub Secret
-    (SESSION_JSON)-এর Cookie-Editor এক্সপোর্ট normalize করে ব্যবহার হয়।"""
     if os.path.exists(SESSION_CACHE_FILE):
         try:
             with open(SESSION_CACHE_FILE, "r", encoding="utf-8") as f:
@@ -96,7 +92,6 @@ def load_session():
                 return cached
         except Exception as e:
             print(f"⚠️ ক্যাশড সেশন পড়তে সমস্যা, Secret-এ fallback: {e}")
-
     data = None
     s = os.environ.get("SESSION_JSON")
     if s:
@@ -125,8 +120,6 @@ def validate_session():
     return True
 
 def save_session_cache(context, label=""):
-    """context.storage_state() দিয়ে বর্তমান সেশন (আপডেটেড কুকি/টোকেনসহ) ফাইলে সেভ।
-    পরের রানে load_session() এটাকে Secret-এর চেয়ে বেশি প্রায়োরিটি দেবে।"""
     try:
         context.storage_state(path=SESSION_CACHE_FILE)
         print(f"💾 সেশন ক্যাশ সেভ হলো{(' — ' + label) if label else ''}")
@@ -134,8 +127,6 @@ def save_session_cache(context, label=""):
         print(f"⚠️ সেশন ক্যাশ সেভ ব্যর্থ: {e}")
 
 def clear_session_cache():
-    """সেশন dead হলে পুরনো ক্যাশ মুছে ফেলা হয়, যেন পরের রানে load_session()
-    বাধ্য হয়ে fresh GitHub Secret ব্যবহার করে — নাহলে বারবার একই মৃত ক্যাশ লোড হতো।"""
     if os.path.exists(SESSION_CACHE_FILE):
         os.remove(SESSION_CACHE_FILE)
         print("🗑️ পুরনো সেশন ক্যাশ মুছে ফেলা হলো — পরের রানে fresh Secret ব্যবহার হবে")
@@ -283,12 +274,13 @@ def add_to_topic_memory(text):
     save_topic_memory(mem)
 
 # ──────────────────────────────────────────────
-# DISCOVERY: sitemap / RSS
+# DISCOVERY: sitemap / RSS (ফিক্স ৫+৬)
 # ──────────────────────────────────────────────
 def fetch_text(url):
     try:
         r = requests.get(url, headers=HDR, timeout=20)
         if r.status_code == 200:
+            r.encoding = "utf-8"   # ফিক্স ৬: charset হেডার না থাকলে বাংলা mojibake রোধ
             return r.text
     except Exception as e:
         print(f"  ⚠️ fetch fail: {url} ({type(e).__name__})")
@@ -297,14 +289,17 @@ def fetch_text(url):
 def parse_dt(s):
     if not s:
         return None
+    dt = None
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     except Exception:
-        pass
-    try:
-        return parsedate_to_datetime(s)
-    except Exception:
-        return None
+        try:
+            dt = parsedate_to_datetime(s)
+        except Exception:
+            return None
+    if dt and dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)   # ফিক্স ৬: naive → UTC
+    return dt
 
 def parse_sitemap(xml):
     soup = BeautifulSoup(xml, "html.parser")
@@ -324,6 +319,7 @@ def parse_sitemap(xml):
     return urls, children
 
 def parse_rss(xml):
+    """ফিক্স ৫: RSS-এর <title>, <link>, <image>/<enclosure>, <pubDate> সরাসরি তোলা হয়।"""
     soup = BeautifulSoup(xml, "html.parser")
     out = []
     for item in soup.find_all("item"):
@@ -335,7 +331,16 @@ def parse_rss(xml):
         if not link:
             continue
         d = item.find("pubdate")
-        out.append((link, parse_dt(d.get_text(strip=True)) if d else None))
+        img_tag = item.find("image") or item.find("enclosure") or item.find("media:content")
+        image = None
+        if img_tag is not None:
+            image = img_tag.get_text(strip=True) or img_tag.get("url") or None
+        out.append({
+            "link": link,
+            "dt": parse_dt(d.get_text(strip=True)) if d else None,
+            "title": t.get_text(strip=True) or None,
+            "image": image,
+        })
     return out
 
 def get_source_urls(src):
@@ -350,16 +355,22 @@ def get_source_urls(src):
             if not xml:
                 continue
             urls, children = parse_sitemap(xml)
-            out += urls
-            if children and not urls:
-                for ch in children[:2]:
+            out += [{"link": u, "dt": dt, "title": None, "image": None} for u, dt in urls]
+            if children:
+                # ফিক্স ৬: root index-এ categories/topics জাঙ্ক থাকে; আসল খবর
+                # থাকে "sitemap-news-*" child-এ (নতুনটা আগে সাজানো)।
+                news_children = [c for c in children if "news" in c.lower()]
+                targets = news_children[:3] if news_children else children[:3]
+                print(f"  📚 {src['name']}: {len(children)} child sitemap → news-ফিল্টারড {len(targets)}")
+                for ch in targets:
                     cxml = fetch_text(ch)
                     if cxml:
-                        out += parse_sitemap(cxml)[0]
+                        out += [{"link": u, "dt": dt, "title": None, "image": None}
+                                for u, dt in parse_sitemap(cxml)[0]]
     return out
 
 # ──────────────────────────────────────────────
-# og:title + og:image
+# og:title + og:image (fallback) + ফিক্স ৭
 # ──────────────────────────────────────────────
 def clean_og_title(title):
     if not title:
@@ -370,20 +381,21 @@ def clean_og_title(title):
         title = max(parts, key=len)
     return title.strip()
 
+def fix_img_url(img, url):
+    if img.startswith("//"):
+        return "https:" + img
+    if img.startswith("/"):
+        return urljoin(url, img)
+    return img
+
 VIDEO_THUMB_HOSTS = ("ytimg.com", "youtube.com", "youtu.be", "vimeocdn.com", "i.vimeocdn.com")
 
 def fetch_og(url):
-    """ফিক্স ৩: ভিডিও-আর্টিকেল ফিল্টার — og:type=video, og:video[:url], twitter:player
-    মেটা-ট্যাগ থাকলে বা ছবির URL YouTube/Vimeo থাম্বনেইল হোস্টের হলে None রিটার্ন
-    (কার্ডে ভিডিও-থাম্বনেইল বসানো এড়াতে)।
-    ডায়াগনস্টিক: ঠিক কোন কারণে None রিটার্ন হলো তা এখন প্রিন্ট হয় — নাহলে
-    pick_article()-এ candidate silently বাদ পড়ে যায়, কারণ বোঝার উপায় থাকে না।"""
     html = fetch_text(url)
     if not html:
         print(f"  ⚠️ page fetch failed: {url}")
         return None
     soup = BeautifulSoup(html, "html.parser")
-
     og_type = soup.find("meta", property="og:type")
     if og_type and (og_type.get("content") or "").strip().lower() == "video":
         print(f"  🎬 video (og:type) skip: {url}")
@@ -397,7 +409,6 @@ def fetch_og(url):
     if soup.find("iframe", src=re.compile(r"(youtube\.com/embed|youtu\.be|player\.vimeo\.com)", re.I)):
         print(f"  🎬 video (iframe embed) skip: {url}")
         return None
-
     t = soup.find("meta", property="og:title")
     i = soup.find("meta", property="og:image")
     if not (t and i):
@@ -408,16 +419,14 @@ def fetch_og(url):
     if not title or not img:
         print(f"  ⚠️ og:title/og:image ফাঁকা: {url}")
         return None
-
     if any(host in img for host in VIDEO_THUMB_HOSTS):
         print(f"  🎬 video (থাম্বনেইল হোস্ট) skip: {url}")
         return None
-
     title = clean_og_title(title)
-    if img.startswith("//"):
-        img = "https:" + img
-    elif img.startswith("/"):
-        img = urljoin(url, img)
+    img = fix_img_url(img, url)
+    # ফিক্স ৭: বণিকবার্তার og:image = original_images/<id>.preview.jpg (লোগো-সহ
+    # ব্র্যান্ডেড)। ".preview" স্ট্রিপ করলেই ক্লিন original ছবি — বাড়তি রিকোয়েস্ট নেই।
+    img = img.replace(".preview.jpg", ".jpg")
     return title, img
 
 def pick_article(posted_cache, failed):
@@ -427,19 +436,26 @@ def pick_article(posted_cache, failed):
         cands = get_source_urls(src)
         random.shuffle(cands)
         seen = 0
-        for link, dt in cands:
+        for cand in cands:
             if seen >= 10:
                 break
             seen += 1
+            link, dt = cand["link"], cand["dt"]
             if link in failed or is_duplicate(link, posted_cache):
                 continue
             if dt and (now - dt).total_seconds() > 24 * 3600:
                 continue
-            og = fetch_og(link)
-            if not og:
-                failed.add(link)
-                continue
-            title, img = og
+            # ফিক্স ৫: RSS সরাসরি title+image দিলে আর্টিকেল পেজে যাওয়াই লাগে না
+            if cand.get("title") and cand.get("image"):
+                title = clean_og_title(cand["title"])
+                img = fix_img_url(cand["image"], link)
+                print("  📰 RSS ডেটা সরাসরি ব্যবহার হচ্ছে (og ফেচ লাগেনি)")
+            else:
+                og = fetch_og(link)
+                if not og:
+                    failed.add(link)
+                    continue
+                title, img = og
             if len(title) < 10 or is_duplicate(title, posted_cache):
                 continue
             if is_similar_topic(title, load_topic_memory()):
@@ -757,8 +773,6 @@ def run_bot_loop():
                 add_to_topic_memory(art["title"])
                 trim_cache(POSTED_CACHE)
                 print("✅ Posted!")
-                # ফিক্স ১: প্রতি সফল পোস্টের পর সেশন ক্যাশ আপডেট — Facebook
-                # ব্যবহারের সময় টোকেন রোটেট করলে সেটাও ধরা থাকবে।
                 save_session_cache(context, label=f"post #{iteration}")
                 if increment_daily_counter():
                     break
@@ -769,13 +783,10 @@ def run_bot_loop():
             print(f"⏳ Next in {delay // 60}m...")
             time.sleep(delay)
 
-        # ফিক্স ১: রান শেষে (সফল/ব্যর্থ যাই হোক) চূড়ান্ত state সেভ — ব্যতিক্রম
-        # শুধু সেশন dead হলে, তখন ক্যাশ মুছে ফেলা হয় যেন পরের রান fresh Secret নেয়।
         if session_died:
             clear_session_cache()
         else:
             save_session_cache(context, label="run end")
-
         browser.close()
     print("\n🔒 Browser closed. Loop ended.")
 
