@@ -21,8 +21,11 @@
 ১২. sitemap-index-এ root-জাঙ্ক বাদ — child থাকলে root-এর categories/topics জাঙ্ক
     ক্যান্ডিডেটে যোগ হয় না; শুধু child news sitemap থেকে আসল আর্টিকেল।
 ১৩. download_image() Referer হেডার encode — RSS (ParsToday) লিংকে raw বাংলা
-    ক্যারেক্টার থাকে; হেডার-ভ্যালু Python latin-1-এ এনকোড করার চেষ্টা করে যা
-    বাংলা ধরে না। requote_uri() দিয়ে percent-encode করে দিলে হেডার নিরাপদ হয়।
+    ক্যারেক্টার থাকে; requote_uri() দিয়ে percent-encode করে হেডার latin-1-সেফ করা।
+১৪. পোস্ট-সফলতার চেক এখন কম্পোজার-নির্দিষ্ট — "যেকোনো dialog" না দেখে,
+    কম্পোজারের textbox উধাও হওয়াই সফলতার প্রমাণ। লুকানো Notifications প্যানেল
+    আর ভুল "fail" দেবে না (পোস্ট হয়েছে অথচ কাউন্ট/ক্যাশ মিস হতো যেটা)।
+    "Publish Original Post" বাটন থেকে গেলে তবেই fail।
 """
 import os, re, json, time, random, hashlib, requests, jinja2, base64, warnings
 import pytz
@@ -286,7 +289,7 @@ def add_to_topic_memory(text):
     save_topic_memory(mem)
 
 # ──────────────────────────────────────────────
-# DISCOVERY: sitemap / RSS (ফিক্স ৬+১০+১২)
+# DISCOVERY: sitemap / RSS (ফিক্স ৬+১+১২)
 # ──────────────────────────────────────────────
 def fetch_text(url):
     try:
@@ -569,7 +572,7 @@ def image_to_base64(path):
 def bengali_date_today():
     months = {1: "জানুয়ারি", 2: "ফেব্রুয়ারি", 3: "মার্চ", 4: "এপ্রিল", 5: "মে", 6: "জুন",
               7: "জুলাই", 8: "আগস্ট", 9: "সেপ্টেম্বর", 10: "অক্টোবর", 11: "নভেম্বর", 12: "ডিসেম্বর"}
-    bd = ["০", "", "২", "৩", "৪", "৫", "৬", "৭", "৮", "৯"]   # ফিক্স ৮: সম্পূর্ণ লিস্ট
+    bd = ["০", "", "২", "", "৪", "", "৬", "", "৮", ""]   # ফিক্স ৮: সম্পূর্ণ লিস্ট
     now = datetime.now(BD_TZ)
     day = "".join(bd[int(d)] for d in str(now.day))
     year = "".join(bd[int(d)] for d in str(now.year))
@@ -624,7 +627,7 @@ def human_type(element, text):
     time.sleep(random.uniform(0.5, 1.2))
 
 # ──────────────────────────────────────────────
-# FACEBOOK POSTING (+ ফিক্স ৯)
+# FACEBOOK POSTING (+ ফিক্স ৯+১৪)
 # ──────────────────────────────────────────────
 def post_to_facebook(page, caption, image_path):
     try:
@@ -695,8 +698,18 @@ def post_to_facebook(page, caption, image_path):
         except Exception:
             pass
 
-        if page.query_selector('div[role="dialog"]'):
-            print("  ⚠️ dialog still open after Post")
+        # ফিক্স ১৪: সফলতার চেক এখন কম্পোজার-নির্দিষ্ট — "যেকোনো dialog" না দেখে
+        # কম্পোজারের textbox উধাও হওয়াই প্রমাণ পোস্ট হয়েছে। লুকানো Notifications
+        # প্যানেল আর ভুল "fail" দেবে না। "Publish Original Post" বাটন থেকে গেলে fail।
+        try:
+            page.wait_for_selector('div[role="dialog"] div[role="textbox"]',
+                                   state="hidden", timeout=8000)
+        except Exception:
+            pass
+        still_open = page.query_selector('div[role="dialog"] div[role="textbox"]') or \
+            page.query_selector('div[role="dialog"] div[role="button"]:has(span:text-is("Publish Original Post"))')
+        if still_open:
+            print("  ⚠️ composer still open after Post")
             page.screenshot(path=f"fb_debug_{int(time.time())}.png")
             return "fail"
         return "ok"
