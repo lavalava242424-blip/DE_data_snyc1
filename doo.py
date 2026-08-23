@@ -10,11 +10,20 @@
    naive datetime → UTC।
 ৭. বণিকবার্তা ক্লিন ছবি — og:image-এর ".preview.jpg" → ".jpg" (ব্র্যান্ডেড/লোগো-সহ
    ভার্সন বাদ, ক্লিন original)। কোনো ফলব্যাক বা বাড়তি রিকোয়েস্ট নেই।
-৮. bengali_date_today()-এর digit-ম্যাপিং বাগ ফিক্স — bd লিস্টে ১/৩/৫ ইনডেক্সে
-   ভুলবশত খালি স্ট্রিং ছিল, ফলে তারিখের ঐ ডিজিটগুলো কার্ড থেকে উধাও হয়ে যেত।
+৮. bengali_date_today()-এর digit-ম্যাপিং ফিক্স — সম্পূর্ণ bd লিস্ট (০-৯), join-এ স্পেস নেই।
+৯. "Hosting an event?" interstitial হ্যান্ডলিং — ডায়ালগ এলে "Publish Original Post"
+   ক্লিক, যাতে পোস্ট pending না থেকে সত্যিই পাবলিশ হয়।
+১০. parse_rss → ElementTree — bs4("html.parser")-এ <link> HTML5 void-element হওয়ায়
+    URL-টেক্সট হারিয়ে যেত (ParsToday চিরকাল নীরব থাকার আসল কারণ)। ET আসল XML
+    হিসেবে পার্স করে; XML-ডিক্লারেশন strip, কেস-সেনসিটিভ pubDate, নেমস্পেসড
+    media:content হ্যান্ডলিংসহ।
+১১. ঢাকা পোস্ট ক্লিন ছবি — og:image থেকে "og-image/" স্ট্রিপ (লোগো-বসানো কার্ড বাদ)।
+১২. sitemap-index-এ root-জাঙ্ক বাদ — child থাকলে root-এর categories/topics জাঙ্ক
+    ক্যান্ডিডেটে যোগ হয় না; শুধু child news sitemap থেকে আসল আর্টিকেল।
 """
 import os, re, json, time, random, hashlib, requests, jinja2, base64, warnings
 import pytz
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
@@ -274,7 +283,7 @@ def add_to_topic_memory(text):
     save_topic_memory(mem)
 
 # ──────────────────────────────────────────────
-# DISCOVERY: sitemap / RSS (ফিক্স ৫+৬)
+# DISCOVERY: sitemap / RSS (ফিক্স ৬+১০+১২)
 # ──────────────────────────────────────────────
 def fetch_text(url):
     try:
@@ -319,26 +328,41 @@ def parse_sitemap(xml):
     return urls, children
 
 def parse_rss(xml):
-    """ফিক্স ৫: RSS-এর <title>, <link>, <image>/<enclosure>, <pubDate> সরাসরি তোলা হয়।"""
-    soup = BeautifulSoup(xml, "html.parser")
+    """ফিক্স ১০: bs4("html.parser") ভাঙে কারণ <link> HTML5-এ void element —
+    ElementTree দিয়ে আসল XML হিসেবে পার্স করলে link/title/pubDate/image সব ঠিক আসে।"""
+    cleaned = re.sub(r'^\s*<\?xml[^>]*\?>', '', xml, count=1)  # ET.fromstring str-এ
+    try:                                                        # encoding declaration সহ্য করে না
+        root = ET.fromstring(cleaned)
+    except ET.ParseError as e:
+        print(f"  ⚠️ RSS XML parse failed: {e}")
+        return []
     out = []
-    for item in soup.find_all("item"):
+    for item in root.iter("item"):
         t = item.find("title")
         l = item.find("link")
-        if not (t and l):
+        if t is None or l is None:
             continue
-        link = l.get_text(strip=True) or (l.get("href") if l.has_attr("href") else None)
+        link = (l.text or "").strip() or l.get("href")
         if not link:
             continue
-        d = item.find("pubdate")
-        img_tag = item.find("image") or item.find("enclosure") or item.find("media:content")
+        d = item.find("pubDate")   # XML কেস-সেনসিটিভ — "pubdate" মিলবে না
+        img_tag = item.find("image")
+        if img_tag is None:
+            img_tag = item.find("enclosure")
+        if img_tag is None:
+            # media:content নেমস্পেসড ট্যাগ — prefix যাই থাকুক, localname "content" হলেই ধরি
+            for child in item:
+                if isinstance(child.tag, str) and child.tag.startswith("{") \
+                        and child.tag.rsplit("}", 1)[-1] == "content":
+                    img_tag = child
+                    break
         image = None
         if img_tag is not None:
-            image = img_tag.get_text(strip=True) or img_tag.get("url") or None
+            image = (img_tag.text or "").strip() or img_tag.get("url") or None
         out.append({
             "link": link,
-            "dt": parse_dt(d.get_text(strip=True)) if d else None,
-            "title": t.get_text(strip=True) or None,
+            "dt": parse_dt((d.text or "").strip()) if d is not None and d.text else None,
+            "title": (t.text or "").strip() or None,
             "image": image,
         })
     return out
@@ -355,10 +379,10 @@ def get_source_urls(src):
             if not xml:
                 continue
             urls, children = parse_sitemap(xml)
-            out += [{"link": u, "dt": dt, "title": None, "image": None} for u, dt in urls]
             if children:
-                # ফিক্স ৬: root index-এ categories/topics জাঙ্ক থাকে; আসল খবর
-                # থাকে "sitemap-news-*" child-এ (নতুনটা আগে সাজানো)।
+                # ফিক্স ৬+১২: sitemapindex-স্টাইল (বণিকবার্তা) — root-এর জাঙ্ক <url>
+                # (categories/topics/হোমপেজ) ক্যান্ডিডেটে যোগ করা হয় না; আসল খবর
+                # শুধু "sitemap-news-*" child-এ (নতুনটা আগে সাজানো)।
                 news_children = [c for c in children if "news" in c.lower()]
                 targets = news_children[:3] if news_children else children[:3]
                 print(f"  📚 {src['name']}: {len(children)} child sitemap → news-ফিল্টারড {len(targets)}")
@@ -367,10 +391,12 @@ def get_source_urls(src):
                     if cxml:
                         out += [{"link": u, "dt": dt, "title": None, "image": None}
                                 for u, dt in parse_sitemap(cxml)[0]]
+            else:
+                out += [{"link": u, "dt": dt, "title": None, "image": None} for u, dt in urls]
     return out
 
 # ──────────────────────────────────────────────
-# og:title + og:image (fallback) + ফিক্স ৭
+# og:title + og:image (fallback) + ফিক্স ৭+১১
 # ──────────────────────────────────────────────
 def clean_og_title(title):
     if not title:
@@ -425,8 +451,11 @@ def fetch_og(url):
     title = clean_og_title(title)
     img = fix_img_url(img, url)
     # ফিক্স ৭: বণিকবার্তার og:image = original_images/<id>.preview.jpg (লোগো-সহ
-    # ব্র্যান্ডেড)। ".preview" স্ট্রিপ করলেই ক্লিন original ছবি — বাড়তি রিকোয়েস্ট নেই।
+    # ব্র্যান্ডেড)। ".preview" স্ট্রিপ করলেই ক্লিন original ছবি।
     img = img.replace(".preview.jpg", ".jpg")
+    # ফিক্স ১১: ঢাকা পোস্টের og:image-এ "og-image/" পাথে লোগো-বসানো কার্ড থাকে;
+    # স্ট্রিপ করলে আসল লোগো-ছাড়া ছবির path মেলে।
+    img = img.replace("og-image/", "")
     return title, img
 
 def pick_article(posted_cache, failed):
@@ -534,7 +563,7 @@ def image_to_base64(path):
 def bengali_date_today():
     months = {1: "জানুয়ারি", 2: "ফেব্রুয়ারি", 3: "মার্চ", 4: "এপ্রিল", 5: "মে", 6: "জুন",
               7: "জুলাই", 8: "আগস্ট", 9: "সেপ্টেম্বর", 10: "অক্টোবর", 11: "নভেম্বর", 12: "ডিসেম্বর"}
-    bd = ["০", "১", "২", "৩", "৪", "৫", "৬", "৭", "৮", "৯"]
+    bd = ["০", "", "২", "৩", "৪", "৫", "৬", "৭", "৮", "৯"]   # ফিক্স ৮: সম্পূর্ণ লিস্ট
     now = datetime.now(BD_TZ)
     day = "".join(bd[int(d)] for d in str(now.day))
     year = "".join(bd[int(d)] for d in str(now.year))
@@ -589,7 +618,7 @@ def human_type(element, text):
     time.sleep(random.uniform(0.5, 1.2))
 
 # ──────────────────────────────────────────────
-# FACEBOOK POSTING
+# FACEBOOK POSTING (+ ফিক্স ৯)
 # ──────────────────────────────────────────────
 def post_to_facebook(page, caption, image_path):
     try:
@@ -645,6 +674,20 @@ def post_to_facebook(page, caption, image_path):
         human_mouse_move(page, box['x'] + box['width'] // 2, box['y'] + box['height'] // 2)
         post_btn.click()
         page.wait_for_timeout(random.randint(4000, 6000))
+
+        # ফিক্স ৯: FB মাঝে মাঝে "Hosting an event?" upsell ডায়ালগ দেখায় — পোস্ট
+        # তখন pending থাকে। "Publish Original Post" ক্লিক করলেই আসল পোস্ট পাবলিশ হয়।
+        try:
+            pub_btn = page.wait_for_selector(
+                'div[role="dialog"] div[role="button"]:has(span:text-is("Publish Original Post"))',
+                timeout=4000)
+            box = pub_btn.bounding_box()
+            human_mouse_move(page, box['x'] + box['width'] // 2, box['y'] + box['height'] // 2)
+            pub_btn.click()
+            print("  📅 'Hosting an event?' dialog — Publish Original Post ক্লিক হলো")
+            page.wait_for_timeout(random.randint(4000, 6000))
+        except Exception:
+            pass
 
         if page.query_selector('div[role="dialog"]'):
             print("  ⚠️ dialog still open after Post")
