@@ -20,6 +20,9 @@
 ১১. ঢাকা পোস্ট ক্লিন ছবি — og:image থেকে "og-image/" স্ট্রিপ (লোগো-বসানো কার্ড বাদ)।
 ১২. sitemap-index-এ root-জাঙ্ক বাদ — child থাকলে root-এর categories/topics জাঙ্ক
     ক্যান্ডিডেটে যোগ হয় না; শুধু child news sitemap থেকে আসল আর্টিকেল।
+১৩. download_image() Referer হেডার encode — RSS (ParsToday) লিংকে raw বাংলা
+    ক্যারেক্টার থাকে; হেডার-ভ্যালু Python latin-1-এ এনকোড করার চেষ্টা করে যা
+    বাংলা ধরে না। requote_uri() দিয়ে percent-encode করে দিলে হেডার নিরাপদ হয়।
 """
 import os, re, json, time, random, hashlib, requests, jinja2, base64, warnings
 import pytz
@@ -501,7 +504,10 @@ def download_image(url, fname, referer=None):
     headers = dict(HDR)
     headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
     if referer:
-        headers["Referer"] = referer
+        # ফিক্স ১৩: ParsToday-র লিংকে raw বাংলা ক্যারেক্টার থাকে (percent-encoded
+        # না)। হেডার-ভ্যালু হিসেবে raw ইউনিকোড পাঠালে http.client সেটাকে latin-1-এ
+        # এনকোড করতে গিয়ে ব্যর্থ হয় — requote_uri() দিয়ে ASCII-সেফ করে দিলে ঠিক হয়।
+        headers["Referer"] = requests.utils.requote_uri(referer)
     try:
         r = requests.get(url, headers=headers, stream=True, timeout=15)
         if r.status_code == 200:
