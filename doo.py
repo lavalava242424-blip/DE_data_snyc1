@@ -26,6 +26,10 @@
     কম্পোজারের textbox উধাও হওয়াই সফলতার প্রমাণ। লুকানো Notifications প্যানেল
     আর ভুল "fail" দেবে না (পোস্ট হয়েছে অথচ কাউন্ট/ক্যাশ মিস হতো যেটা)।
     "Publish Original Post" বাটন থেকে গেলে তবেই fail।
+১৫. বণিকবার্তা সোর্স হিসেবে বাদ — GitHub Actions runner-এর IP-তে Cloudflare
+    চ্যালেঞ্জ পেজ দেয় (HTTP 200-এই, কিন্তু sitemap XML না), তাই সবসময় শূন্য
+    candidate ফেরত আসতো। molab/ব্রাউজার থেকে ঠিকই কাজ করে, কিন্তু GitHub
+    Actions-এই বট চলে বলে এই সোর্স কার্যত অচল — তাই SOURCES থেকে সরানো হলো।
 """
 import os, re, json, time, random, hashlib, requests, jinja2, base64, warnings
 import pytz
@@ -54,23 +58,19 @@ SESSION_CACHE_FILE = "session_state.json"
 MAX_DURATION = 6 * 3600
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
-# ──────────────────────────────────────────────
-# ৪ বাংলা সোর্স
-# ──────────────────────────────────────────────
 SOURCES = [
     {"name": "ঢাকা পোস্ট", "base": "https://www.dhakapost.com", "kind": "sitemap",
      "maps": ["https://www.dhakapost.com/sitemaps/news-sitemap.xml"]},
     {"name": "আমার দেশ", "base": "https://www.dailyamardesh.com", "kind": "sitemap",
      "maps": ["https://www.dailyamardesh.com/news-sitemap.xml"]},
-    {"name": "বণিকবার্তা", "base": "https://bonikbarta.com", "kind": "sitemap",
-     "maps": ["https://bonikbarta.com/sitemap.xml"]},
+    # বণিকবার্তা সরানো হয়েছে — Cloudflare-প্রোটেক্টেড, GitHub Actions runner-এর
+    # IP রেঞ্জে চ্যালেঞ্জ পেজ দেয় (200 স্ট্যাটাসেই, কিন্তু আসল sitemap XML না),
+    # ফলে সবসময় শূন্য candidate — অথচ ব্রাউজার/molab-এ ঠিকই কাজ করে। GitHub
+    # Actions-এই বট চলবে বলে এই সোর্স কার্যত ব্যবহারযোগ্য না, তাই বাদ।
     {"name": "ParsToday বাংলা", "base": "https://parstoday.ir", "kind": "rss",
      "maps": ["https://parstoday.ir/bn/rss"]},
 ]
 
-# ──────────────────────────────────────────────
-# SESSION (ফিক্স ১: cache-first, Secret fallback)
-# ──────────────────────────────────────────────
 def _fix_samesite(v):
     if not v:
         return None
@@ -146,9 +146,6 @@ def clear_session_cache():
         os.remove(SESSION_CACHE_FILE)
         print("🗑️ পুরনো সেশন ক্যাশ মুছে ফেলা হলো — পরের রানে fresh Secret ব্যবহার হবে")
 
-# ──────────────────────────────────────────────
-# CHECKPOINT / SESSION-DEAD LOCK
-# ──────────────────────────────────────────────
 def is_captcha_locked():
     if not os.path.exists(CAPTCHA_LOCK_FILE):
         return False
@@ -187,9 +184,6 @@ def check_fb_health(page):
         pass
     return "ok"
 
-# ──────────────────────────────────────────────
-# CACHE + DAILY LIMIT
-# ──────────────────────────────────────────────
 def text_hash(text):
     t = re.sub(r'[^\w\s]', '', re.sub(r'\s+', ' ', text.lower().strip()))[:250]
     return hashlib.sha256(t.encode()).hexdigest()[:16]
@@ -241,9 +235,6 @@ def increment_daily_counter():
     print(f"📈 Daily count: {count}/{target}")
     return count >= target
 
-# ──────────────────────────────────────────────
-# TOPIC MEMORY
-# ──────────────────────────────────────────────
 STOPWORDS = {
     "এর", "এবং", "ও", "বা", "যে", "কি", "না", "হয়", "হলো", "ছিল", "আছে",
     "করে", "করছে", "করবেন", "করার", "বলেন", "বলেছেন", "জানান", "জানিয়েছেন",
@@ -288,14 +279,11 @@ def add_to_topic_memory(text):
     mem.append({"time": time.time(), "keywords": list(extract_keywords(text))})
     save_topic_memory(mem)
 
-# ──────────────────────────────────────────────
-# DISCOVERY: sitemap / RSS (ফিক্স ৬+১+১২)
-# ──────────────────────────────────────────────
 def fetch_text(url):
     try:
         r = requests.get(url, headers=HDR, timeout=20)
         if r.status_code == 200:
-            r.encoding = "utf-8"   # ফিক্স ৬: charset হেডার না থাকলে বাংলা mojibake রোধ
+            r.encoding = "utf-8"
             return r.text
     except Exception as e:
         print(f"  ⚠️ fetch fail: {url} ({type(e).__name__})")
@@ -313,7 +301,7 @@ def parse_dt(s):
         except Exception:
             return None
     if dt and dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)   # ফিক্স ৬: naive → UTC
+        dt = dt.replace(tzinfo=timezone.utc)
     return dt
 
 def parse_sitemap(xml):
@@ -334,10 +322,8 @@ def parse_sitemap(xml):
     return urls, children
 
 def parse_rss(xml):
-    """ফিক্স ১০: bs4("html.parser") ভাঙে কারণ <link> HTML5-এ void element —
-    ElementTree দিয়ে আসল XML হিসেবে পার্স করলে link/title/pubDate/image সব ঠিক আসে।"""
-    cleaned = re.sub(r'^\s*<\?xml[^>]*\?>', '', xml, count=1)  # ET.fromstring str-এ
-    try:                                                        # encoding declaration সহ্য করে না
+    cleaned = re.sub(r'^\s*<\?xml[^>]*\?>', '', xml, count=1)
+    try:
         root = ET.fromstring(cleaned)
     except ET.ParseError as e:
         print(f"  ⚠️ RSS XML parse failed: {e}")
@@ -351,12 +337,11 @@ def parse_rss(xml):
         link = (l.text or "").strip() or l.get("href")
         if not link:
             continue
-        d = item.find("pubDate")   # XML কেস-সেনসিটিভ — "pubdate" মিলবে না
+        d = item.find("pubDate")
         img_tag = item.find("image")
         if img_tag is None:
             img_tag = item.find("enclosure")
         if img_tag is None:
-            # media:content নেমস্পেসড ট্যাগ — prefix যাই থাকুক, localname "content" হলেই ধরি
             for child in item:
                 if isinstance(child.tag, str) and child.tag.startswith("{") \
                         and child.tag.rsplit("}", 1)[-1] == "content":
@@ -386,9 +371,6 @@ def get_source_urls(src):
                 continue
             urls, children = parse_sitemap(xml)
             if children:
-                # ফিক্স ৬+১২: sitemapindex-স্টাইল (বণিকবার্তা) — root-এর জাঙ্ক <url>
-                # (categories/topics/হোমপেজ) ক্যান্ডিডেটে যোগ করা হয় না; আসল খবর
-                # শুধু "sitemap-news-*" child-এ (নতুনটা আগে সাজানো)।
                 news_children = [c for c in children if "news" in c.lower()]
                 targets = news_children[:3] if news_children else children[:3]
                 print(f"  📚 {src['name']}: {len(children)} child sitemap → news-ফিল্টারড {len(targets)}")
@@ -401,9 +383,6 @@ def get_source_urls(src):
                 out += [{"link": u, "dt": dt, "title": None, "image": None} for u, dt in urls]
     return out
 
-# ──────────────────────────────────────────────
-# og:title + og:image (fallback) + ফিক্স ৭+১১
-# ──────────────────────────────────────────────
 def clean_og_title(title):
     if not title:
         return title
@@ -456,11 +435,6 @@ def fetch_og(url):
         return None
     title = clean_og_title(title)
     img = fix_img_url(img, url)
-    # ফিক্স ৭: বণিকবার্তার og:image = original_images/<id>.preview.jpg (লোগো-সহ
-    # ব্র্যান্ডেড)। ".preview" স্ট্রিপ করলেই ক্লিন original ছবি।
-    img = img.replace(".preview.jpg", ".jpg")
-    # ফিক্স ১১: ঢাকা পোস্টের og:image-এ "og-image/" পাথে লোগো-বসানো কার্ড থাকে;
-    # স্ট্রিপ করলে আসল লোগো-ছাড়া ছবির path মেলে।
     img = img.replace("og-image/", "")
     return title, img
 
@@ -480,7 +454,6 @@ def pick_article(posted_cache, failed):
                 continue
             if dt and (now - dt).total_seconds() > 24 * 3600:
                 continue
-            # ফিক্স ৫: RSS সরাসরি title+image দিলে আর্টিকেল পেজে যাওয়াই লাগে না
             if cand.get("title") and cand.get("image"):
                 title = clean_og_title(cand["title"])
                 img = fix_img_url(cand["image"], link)
@@ -500,16 +473,10 @@ def pick_article(posted_cache, failed):
             return {"title": title, "link": link, "image_url": img, "source": src["name"]}
     return None
 
-# ──────────────────────────────────────────────
-# IMAGE + CARD
-# ──────────────────────────────────────────────
 def download_image(url, fname, referer=None):
     headers = dict(HDR)
     headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
     if referer:
-        # ফিক্স ১৩: ParsToday-র লিংকে raw বাংলা ক্যারেক্টার থাকে (percent-encoded
-        # না)। হেডার-ভ্যালু হিসেবে raw ইউনিকোড পাঠালে http.client সেটাকে latin-1-এ
-        # এনকোড করতে গিয়ে ব্যর্থ হয় — requote_uri() দিয়ে ASCII-সেফ করে দিলে ঠিক হয়।
         headers["Referer"] = requests.utils.requote_uri(referer)
     try:
         r = requests.get(url, headers=headers, stream=True, timeout=15)
@@ -572,7 +539,7 @@ def image_to_base64(path):
 def bengali_date_today():
     months = {1: "জানুয়ারি", 2: "ফেব্রুয়ারি", 3: "মার্চ", 4: "এপ্রিল", 5: "মে", 6: "জুন",
               7: "জুলাই", 8: "আগস্ট", 9: "সেপ্টেম্বর", 10: "অক্টোবর", 11: "নভেম্বর", 12: "ডিসেম্বর"}
-    bd = ["০", "", "২", "", "৪", "", "৬", "", "৮", ""]   # ফিক্স ৮: সম্পূর্ণ লিস্ট
+    bd = ["০", "১", "২", "৩", "৪", "৫", "৬", "৭", "৮", "৯"]   # ফিক্স ১৫: সব ১০টা ডিজিট (আগে বিজোড়গুলো ফাঁকা ছিল)
     now = datetime.now(BD_TZ)
     day = "".join(bd[int(d)] for d in str(now.day))
     year = "".join(bd[int(d)] for d in str(now.year))
@@ -603,9 +570,6 @@ def create_news_card(browser, title, img_path, out_path, category, date_str, log
         page.close()
     return out_path
 
-# ──────────────────────────────────────────────
-# HUMAN-LIKE MOUSE + TYPING
-# ──────────────────────────────────────────────
 def human_mouse_move(page, tx, ty, steps=15):
     sx, sy = random.randint(100, 300), random.randint(100, 300)
     cx = (sx + tx) / 2 + random.randint(-80, 80)
@@ -626,9 +590,6 @@ def human_type(element, text):
             time.sleep(random.uniform(0.3, 0.9))
     time.sleep(random.uniform(0.5, 1.2))
 
-# ──────────────────────────────────────────────
-# FACEBOOK POSTING (+ ফিক্স ৯+১৪)
-# ──────────────────────────────────────────────
 def post_to_facebook(page, caption, image_path):
     try:
         page.goto(f"https://www.facebook.com/profile.php?id={FB_PAGE_ID}",
@@ -648,7 +609,11 @@ def post_to_facebook(page, caption, image_path):
         human_mouse_move(page, box['x'] + box['width'] // 2, box['y'] + box['height'] // 2)
         trigger.click()
         page.wait_for_timeout(random.randint(1500, 2500))
-        page.wait_for_selector('div[role="dialog"]', timeout=15000)
+        # ফিক্স ১৬: এই জেনেরিক div[role="dialog"] ওয়েট বাদ — পেজে একসাথে একাধিক
+        # role="dialog" এলিমেন্ট থাকতে পারে (যেমন লুকানো "Notifications" প্যানেল),
+        # আর Playwright প্রথমটাই ধরে নিত যেটা কম্পোজার নাও হতে পারত, ফলে composer
+        # আসলে visible থাকলেও ভুল dialog-এর জন্য অপেক্ষা করে টাইমআউট হতো। পরের
+        # লাইনের সিলেক্টর (dialog-এর ভেতরের textbox) এমনিতেই composer-নির্দিষ্ট।
 
         tbox = page.wait_for_selector('div[role="dialog"] div[role="textbox"]', timeout=15000)
         human_type(tbox, caption)
@@ -684,8 +649,6 @@ def post_to_facebook(page, caption, image_path):
         post_btn.click()
         page.wait_for_timeout(random.randint(4000, 6000))
 
-        # ফিক্স ৯: FB মাঝে মাঝে "Hosting an event?" upsell ডায়ালগ দেখায় — পোস্ট
-        # তখন pending থাকে। "Publish Original Post" ক্লিক করলেই আসল পোস্ট পাবলিশ হয়।
         try:
             pub_btn = page.wait_for_selector(
                 'div[role="dialog"] div[role="button"]:has(span:text-is("Publish Original Post"))',
@@ -698,9 +661,6 @@ def post_to_facebook(page, caption, image_path):
         except Exception:
             pass
 
-        # ফিক্স ১৪: সফলতার চেক এখন কম্পোজার-নির্দিষ্ট — "যেকোনো dialog" না দেখে
-        # কম্পোজারের textbox উধাও হওয়াই প্রমাণ পোস্ট হয়েছে। লুকানো Notifications
-        # প্যানেল আর ভুল "fail" দেবে না। "Publish Original Post" বাটন থেকে গেলে fail।
         try:
             page.wait_for_selector('div[role="dialog"] div[role="textbox"]',
                                    state="hidden", timeout=8000)
@@ -721,9 +681,6 @@ def post_to_facebook(page, caption, image_path):
             pass
         return "fail"
 
-# ──────────────────────────────────────────────
-# HUMAN DELAY
-# ──────────────────────────────────────────────
 def human_delay(hour):
     if 6 <= hour < 10:
         base = random.randint(22, 35) * 60
@@ -757,9 +714,6 @@ window.navigator.permissions.query = (parameters) => (
 );
 """
 
-# ──────────────────────────────────────────────
-# MAIN LOOP
-# ──────────────────────────────────────────────
 def run_bot_loop():
     if not validate_session():
         return
